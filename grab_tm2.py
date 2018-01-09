@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+# Adapted from ublox_capture_raw.py from the pyUblox library
 
 import ublox, sys, time, struct
 import util
@@ -57,8 +58,8 @@ count_initialized = 0
 avgdelta = None
 
 while True:
-    pcnow = datetime.datetime.utcnow()
     msg = dev.receive_message()
+    pcnow = datetime.datetime.utcnow()
     if msg is None:
         if opts.reopen:
             dev.close()
