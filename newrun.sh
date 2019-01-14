@@ -1,6 +1,6 @@
 #!/bin/bash
 
-BASE=Fe500
+BASE=CERF
 starttime=$( date "+%Y%m%d-%H%M%S" )
 echo Start tag: $starttime
 echo -n Enter description: 
