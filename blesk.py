@@ -75,6 +75,8 @@ try:
 					timestring = '$HIT,'
 					timestring += str(msg.count)
 					timestring += ','
+					timestring += str(datetime.datetime.utcnow())
+					timestring += ','
 					timestring += str(datetime.datetime.utcfromtimestamp(util.gpsTimeToTime(msg.wnR, 1.0e-3*msg.towMsR)))
 					print(timestring)
 					sys.stdout.flush()
