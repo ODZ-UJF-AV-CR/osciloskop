@@ -56,7 +56,7 @@ print "$OSC,", osc.getName(),
 osc.write("MENU:RUN")
 
 gpsport = '/dev/ttyACM0'
-gpsbaudrate = 9600 #921600
+gpsbaudrate = 921600
 
 # Open GPS port
 dev = ublox.UBlox(gpsport, baudrate=gpsbaudrate, timeout=0)
