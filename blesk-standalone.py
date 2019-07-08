@@ -26,13 +26,26 @@
 # H  10 ms => 143 ms (63 frames, 10 MSa/s) => Leads to no more than 1 trigger per 100 ms
 # H  20 ms => 284 ms (63 frames, 5 MSa/s)  => ...ditto, safe.
 # 
-# => In order to time-tag every frame and get 50 MSa/s, 
-#    - hscale = 10 ms
+# => In order to time-tag every frame with 100 ns holdoff and get 50 MSa/s, 
+#    - hscale = 10 ms (=> 140 ms time span)
 #    - MemDepth = 7 MPoints
+#
+# 50 ms hscale results in 0.7 s time span, two frames, 20 MSa/s (two channels).
+# 100 ms hscale results in 1.4 s time span, two frames, 20 MSa/s (two channels).
 #
 # If frames with hscale shorter than 5 ms are requested, trigger holdoff can be set
 # so that subsequent triggers are never closer in time than 100 ms. Some events will
 # be skipped, but every recorded event will be time tagged.
+#
+# Note that for very short frames, this won't work either, because the GPS
+# will not register each trigger event.
+
+# Todo:
+# - Connect this with readout of the frames from oscilloscope, so that the recorded files
+#   are tagged with the GPS time
+# - Verify the trigger horizontal position is saved 
+# - Include precise position recording.
+# - Include position recording into the data frames.
 
 import matplotlib.pyplot as plt
 import sys
