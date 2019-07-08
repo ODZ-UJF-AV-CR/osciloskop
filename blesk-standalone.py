@@ -1,5 +1,35 @@
 #!/usr/bin/env python
 
+# Standalone version of time-tagging script
+# Based on Kakl's version for Micsig.
+# MK, VS
+# 
+# Usage:
+#  - Connect GPS antenna to time tagger-unit
+#  - Configure RIGOL
+#  - Connect Rigol Trigger Out BNC by cable to BNC input on time-tagger unit
+#  - Connect USB
+
+# Settings:
+# --------
+#
+# Trigger out on Rigol works with cca 50% is possible, increasing duty cycle
+# to above 80% as the time between triggers gets shorter.
+#
+# This was done with pulses generated every 1 ms from signal generator.
+#
+# Generally, the trigger period is roughly proportional to timespan window on Rigol,
+# it also slightly depends on MemDepth.
+#
+# With MemDepth of 1.4 MPoints the HScale to trigger period translates as:
+# H   5 ms =>  73 ms (63 frames, 20 MSa/s) => Leads to multiple triggers per 100 ms
+# H  10 ms => 143 ms (63 frames, 10 MSa/s) => Leads to no more than 1 trigger per 100 ms
+# H  20 ms => 284 ms (63 frames, 5 MSa/s)  => ...ditto, safe.
+# 
+# => In order to time-tag every frame and get 50 MSa/s, 
+#    - hscale = 10 ms
+#    - MemDepth = 7 MPoints
+#
 
 import matplotlib.pyplot as plt
 import sys
@@ -13,6 +43,7 @@ import util
 import datetime
 
 
+# If the device was disconnected briefly, this can jump to ACM1 or whatever
 gpsport = '/dev/ttyACM0'
 #gpsbaudrate = 9600
 gpsbaudrate = 921600
