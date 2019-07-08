@@ -30,6 +30,9 @@
 #    - hscale = 10 ms
 #    - MemDepth = 7 MPoints
 #
+# If frames with hscale shorter than 5 ms are requested, trigger holdoff can be set
+# so that subsequent triggers are never closer in time than 100 ms. Some events will
+# be skipped, but every recorded event will be time tagged.
 
 import matplotlib.pyplot as plt
 import sys
