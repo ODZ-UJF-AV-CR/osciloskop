@@ -18,3 +18,7 @@ One mean of data processing is in the oscilloskop-hystogram.ipynb.
 
 # Blesk
 
+Micsig & gps tagger unit.
+
+# Blesk-standalone
+Script for stand-alone use.
