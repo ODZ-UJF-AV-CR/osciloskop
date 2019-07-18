@@ -47,6 +47,7 @@ def getDeviceList():
 
     return result
 
+'''
 # looking for oscilloscope
 devices =  getDeviceList()
 # initiate oscilloscope
@@ -54,6 +55,7 @@ osc = UsbTmcDriver(devices[0])
 
 print "$OSC,", osc.getName(),
 osc.write("MENU:RUN")
+'''
 
 gpsport = '/dev/ttyACM0'
 gpsbaudrate = 921600
