@@ -82,63 +82,68 @@ def read_this_frame_raw():
         osc.write(':STOP')
         time.sleep(1)
 
-        osc.write(':WAV:STAR 1')
-        time.sleep(0.2)
+	retry_count = 3
+        while (retry_count > 0):
+		retry_count = retry_count - 1
 
-        osc.write(':WAV:STOP '+"{0:.0f}".format(mdepth))
-        time.sleep(0.2)
+		osc.write(':WAV:STAR 1')
+		time.sleep(0.5)
 
-        osc.write(':WAV:RES')
-        time.sleep(0.2)
+		osc.write(':WAV:STOP '+"{0:.0f}".format(mdepth))
+		time.sleep(0.5)
 
-        osc.write(':WAV:BEG')
-        time.sleep(0.01)
+		osc.write(':WAV:RES')
+		time.sleep(1)
 
-        wavepart = bytearray()
-        lastwave = bytearray()
+		osc.write(':WAV:BEG')
+		time.sleep(1)
 
-        bytesread = 0
-        flag = 1
-        nowwaiting = 0
-        chrup = 0.2
+		wavepart = bytearray()
+		lastwave = bytearray()
 
-        while (nowwaiting < 5.0):
-                status = osc.ask(':WAV:STAT?')
-                read_status = status[:4]
-                bytes_to_read = int(status[5:])
-                bytesread = bytesread + bytes_to_read
-                log(' '+status)
-                if (read_status == 'IDLE' and bytes_to_read == 0):
-                        break
-                
-                if (read_status == 'READ' or read_status == 'IDLE'):
-                        if (bytes_to_read > 0):            
-                                osc.write(':WAV:DATA?')
-                                time.sleep(0.2)
-                                wavepart = bytearray(osc.read_raw(bytes_to_read))
-                                lastwave = lastwave + wavepart
-                                sys.stdout.write('.')
-                                sys.stdout.flush()
-                                time.sleep(2)
-                                nowwaiting = 0
-                        else:
-                                # There are no data to read now
-                                time.sleep(chrup)
-                                nowwaiting = nowwaiting + chrup
-                                
-                if (flag == 0):
-                        break
-                if (read_status == 'IDLE'):
-                        flag = 0
+		bytesread = 0
+		flag = 1
+		nowwaiting = 0
+		chrup = 0.25
 
-        osc.write(':WAV:END')
+		# We will try to read the waveform three times
+		while (nowwaiting < 5.0):
+			time.sleep(0.2)
+			status = osc.ask(':WAV:STAT?')
+			read_status = status[:4]
+			bytes_to_read = int(status[5:])
+			bytesread = bytesread + bytes_to_read
+			log(' '+status)
+			if (read_status == 'IDLE' and bytes_to_read == 0):
+				break
+			
+			if (read_status == 'READ' or read_status == 'IDLE'):
+				if (bytes_to_read > 0):            
+					osc.write(':WAV:DATA?')
+					time.sleep(0.2)
+					wavepart = bytearray(osc.read_raw(bytes_to_read))
+					lastwave = lastwave + wavepart
+					sys.stdout.write(' '+str(len(wavepart))+' ')
+					sys.stdout.flush()
+					time.sleep(0)
+					nowwaiting = 0
+				else:
+					# There are no data to read now
+					time.sleep(chrup)
+					nowwaiting = nowwaiting + chrup
+					
+			if (flag == 0):
+				break
+			if (read_status == 'IDLE'):
+				flag = 0
 
-        if (len(lastwave) == mdepth and mdepth == bytesread):
-                log('  Expected and read bytes match: '+str(mdepth))
-        else:
-                print '  Adjust delay after BEG - we are loosing data somewhere.'
-                exit(1)
+		osc.write(':WAV:END')
 
+		if (len(lastwave) == mdepth and mdepth == bytesread):
+			log('  Expected and read bytes match: '+str(mdepth))
+			break
+		else:
+			print '  Adjust delay after BEG - we are loosing data somewhere.'
         return(lastwave)
         
 def get_one_frame_raw(thetime,ns):
