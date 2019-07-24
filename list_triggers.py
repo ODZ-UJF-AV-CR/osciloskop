@@ -9,7 +9,8 @@ import numpy as np
 import datetime as dt
 
 print 'epoch,nspart,time'
-for f in glob.iglob("./190721-u-Zdaru/data_magnetic_loop_selected/*.h5"): # generator, search immediate subdirectories 
+#for f in glob.iglob("./190721-u-Zdaru/data_magnetic_loop_selected/*.h5"): # generator, search immediate subdirectories 
+for f in glob.iglob("**/*.h5"): # generator, search immediate subdirectories 
 
     #print f
     with h5py.File(f,'r') as hf:
