@@ -47,7 +47,7 @@ def getDeviceList():
 
     return result
 
-'''
+
 # looking for oscilloscope
 devices =  getDeviceList()
 # initiate oscilloscope
@@ -55,7 +55,7 @@ osc = UsbTmcDriver(devices[0])
 
 print "$OSC,", osc.getName(),
 osc.write("MENU:RUN")
-'''
+
 
 gpsport = '/dev/ttyACM0'
 gpsbaudrate = 921600
@@ -63,40 +63,64 @@ gpsbaudrate = 921600
 # Open GPS port
 dev = ublox.UBlox(gpsport, baudrate=gpsbaudrate, timeout=0)
 
-# Read GPS messages, if any
 while True:
-	try:
-		msg = dev.receive_message()
-	except:
-		continue
-	if (msg is None):
-		pass#break
-	else:
-		if msg.name() == 'TIM_TM2':
-			#print('Got TM2 message')
-			try:
-				msg.unpack()
-				timestring = '$HIT,'
-				timestring += str(msg.count)
-				timestring += ','
-				timestring += str(datetime.datetime.utcnow())
-				timestring += ','
-				timestring += str(datetime.datetime.utcfromtimestamp(util.gpsTimeToTime(msg.wnR, 1.0e-3*msg.towMsR)))
-				print(timestring)
-				sys.stdout.flush()
+	while True:
+		try:
+			msg = dev.receive_message()
+		except:
+			continue
+		if (msg is None):
+			break
 
-				'''
-				osc.write("MENU:STOP")
-				time.sleep(1)
-				osc.write(':STORage:CAPTure')
-				time.sleep(2)
-				#osc.write(':STORage:SAVECH1,UDISK')
-				#time.sleep(5)
-				osc.write("MENU:RUN")
-				#time.sleep(.1s)
-				'''	
+	osc.write(":SINGLE")
 
-			except ublox.UBloxError as e:
-				print(e)
-			#break;
+	# Read GPS messages, if any
+	while True:
+		try:
+			msg = dev.receive_message()
+		except:
+			continue
+		if (msg is None):
+			pass#break
+		else:
+			if msg.name() == 'TIM_TM2':
+				#print('Got TM2 message')
+				try:
+					msg.unpack()
+					timestring = '$HIT,'
+					timestring += str(msg.count)
+					timestring += ','
+					timestring += str(datetime.datetime.utcnow())
+					timestring += ','
+					filename = util.gpsTimeToTime(msg.wnR, 1.0e-3*msg.towMsR)
+					timestring += str(filename)
+					timestring += ','
+					timestring += str(datetime.datetime.utcfromtimestamp(filename))
+					print(timestring)
+					sys.stdout.flush()
+			
+					''' Micsig
+					osc.write("MENU:STOP")
+					time.sleep(1)
+					osc.write(':STORage:CAPTure')
+					time.sleep(2)
+					#osc.write(':STORage:SAVECH1,UDISK')
+					#time.sleep(5)
+					osc.write("MENU:RUN")
+					#time.sleep(.1s)
+					'''
+					#''' RIgol
+					time.sleep(3)
+					#osc.write(":STOP")
+					#time.sleep(1)
+					osc.write(':SAVE:WAVeform D:\\blesky\\' + str(filename) + '.wfm')
+					#time.sleep(30)
+					raw_input("Press Enter to continue...")
+					break
+					#'''
+		
+
+				except ublox.UBloxError as e:
+					print(e)
+					break
 

@@ -432,7 +432,8 @@ def get_one_frame(thetime,ns):
 # Initialize ethernet link to oscilloscope
 
 # For Ethernet
-osc = TmcDriver("TCPIP::10.1.1.3::INSTR")
+#osc = TmcDriver("TCPIP::10.1.1.3::INSTR")
+osc = TmcDriver("TCPIP::192.168.1.166::INSTR")
 print(osc.ask("*IDN?"))
 
 
