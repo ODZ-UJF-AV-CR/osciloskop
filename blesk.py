@@ -115,7 +115,8 @@ while True:
 					#time.sleep(1)
 					osc.write(':SAVE:WAVeform D:\\blesky\\' + str(filename) + '.wfm')
 					#time.sleep(30)
-					raw_input("Press Enter to continue...")
+					osc.write(":RUN")
+					raw_input()
 					break
 					#'''
 		
