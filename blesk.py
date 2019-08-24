@@ -64,6 +64,7 @@ gpsbaudrate = 921600
 dev = ublox.UBlox(gpsport, baudrate=gpsbaudrate, timeout=0)
 
 while True:
+	'''
 	while True:
 		try:
 			msg = dev.receive_message()
@@ -71,7 +72,7 @@ while True:
 			continue
 		if (msg is None):
 			break
-
+	'''
 	osc.write(":SINGLE")
 
 	# Read GPS messages, if any
@@ -92,7 +93,7 @@ while True:
 					timestring += ','
 					timestring += str(datetime.datetime.utcnow())
 					timestring += ','
-					filename = util.gpsTimeToTime(msg.wnR, 1.0e-3*msg.towMsR)
+					filename = util.gpsTimeToTime(msg.wnR, 1.0e-3*msg.towMsR + 1.0e-9*msg.towSubMsR)
 					timestring += str(filename)
 					timestring += ','
 					timestring += str(datetime.datetime.utcfromtimestamp(filename))
@@ -110,11 +111,11 @@ while True:
 					#time.sleep(.1s)
 					'''
 					#''' RIgol
-					time.sleep(3)
+					time.sleep(5)			//!!! Wait for the end of capturing
 					#osc.write(":STOP")
 					#time.sleep(1)
 					osc.write(':SAVE:WAVeform D:\\blesky\\' + str(filename) + '.wfm')
-					#time.sleep(30)
+					time.sleep(1)
 					osc.write(":RUN")
 					raw_input()
 					break
