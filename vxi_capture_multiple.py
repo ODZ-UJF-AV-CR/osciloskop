@@ -6,12 +6,20 @@ from datetime import datetime, UTC
 import h5py
 import numpy as np
 import vxi11
+from tqdm import tqdm
+
 
 OSCILLOSCOPES = {
-    "oscSi": "10.9.9.101",
-    "oscB": "10.9.9.100",
-#    "scopeC": "10.9.0.103",
+    "oscLi6": "10.9.9.101",
+    "oscB10": "10.9.9.100",
+    "oscSi":  "10.9.9.102",
 }
+
+
+# Filename prefix
+PREFIX = ""
+OUTDIR = "./data/CERF_2025_05_27_RUN0"
+
 
 CHANNEL = "CHAN1" 
 
@@ -41,7 +49,7 @@ class RigolScope:
         return self.ask(":TRIG:STAT?").strip()
     def get_frame_count(self):
         # NEFUNGUJE, 
-        return int(self.ask(":FUNC:WREP:FEND?").strip())
+        return int(self.ask(":FUNCtion:WREPlay:FMAX?").strip())
     def select_frame(self, idx):
         self.write(f":REC:FRAM {idx}")
     def set_rec_mode(self, mode="RECORD"):
@@ -102,6 +110,7 @@ def poll_trigger_and_frames(scopes):
             #frames = sc.get_frame_count()
             statuses.append(f"{name}: {trig}")
             #frame_counts.append(f"{name}: {frames} frames")
+            #print( frame_counts )
             #if trig.upper() != "RUN" and trig.upper() != "WAIT" and trig.upper() != "TB":
             if trig.upper() == "STOP":
                 stop_detected = True
@@ -109,16 +118,14 @@ def poll_trigger_and_frames(scopes):
         if stop_detected:
             print("Akvizice je zastavena na některém osciloskopu.")
             break
-        time.sleep(1)
-        print(statuses)
-        print(frame_counts)
+        time.sleep(0.5)
 
 def download_all_frames(sc, start_time, end_time, tag="main"):
     import sys
     import os
 
     channels = ["CHAN1", "CHAN2"]
-    run_time = end_time  # nebo spočítejte rozdíl, pokud chcete délku
+    run_time = end_time
     filename = start_time  # nebo použijte jiný identifikátor
     start_wfd = 0.01
     wfd = start_wfd
@@ -155,9 +162,8 @@ def download_all_frames(sc, start_time, end_time, tag="main"):
         print("FRAMES:", frames, "SUBRUN", filename)
 
         lastwave = bytearray()
-        outdir = "./data"
-        os.makedirs(outdir, exist_ok=True)
-        h5name = f"{outdir}/data_{sc.name}_{filename}_{channel}.h5"
+        os.makedirs(OUTDIR, exist_ok=True)
+        h5name = f"{OUTDIR}/{PREFIX}data_{sc.name}_{filename}.h5"
         with h5py.File(h5name, "w") as hf:
             hf.create_dataset("FRAMES", data=frames)
             hf.create_dataset("XINC", data=xinc)
@@ -166,6 +172,11 @@ def download_all_frames(sc, start_time, end_time, tag="main"):
             hf.create_dataset("YORIGIN", data=yorig)
             hf.create_dataset("XORIGIN", data=xorig)
             hf.create_dataset("CAPTURING", data=run_time)
+            hf.create_dataset("START_TIME", data=start_time)
+            hf.create_dataset("END_TIME", data=end_time)
+            hf.create_dataset("SCOPE_NAME", data=sc.name)
+            hf.create_dataset("IP", data=sc.ip)
+            hf.create_dataset("CHANNEL", data=channel)
             sc.write(":FUNC:WREP:FCUR 1")
             time.sleep(0.5)
             for n in range(1, frames + 1):
@@ -215,7 +226,7 @@ if __name__ == "__main__":
     while True:
         try:
        
-            # Před spuštěním akvizice stáhni případné staré snímky
+            # Před spuštěním mereni stáhni případné staré snímky
             #print("Kontroluji existující frames před měřením...")
             #pre_time = now_utc_str()
             #for sc in scopes.values():
@@ -233,7 +244,7 @@ if __name__ == "__main__":
             time.sleep(0.5)
             for sc in scopes.values():
                 sc.run()
-            time.sleep(2)
+            time.sleep(0.5)
 
             start_time = now_utc_str()
             print("Polling průběhu měření (CTRL+C = přerušení)...")
