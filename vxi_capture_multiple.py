@@ -6,6 +6,7 @@ from datetime import datetime, UTC
 import h5py
 import numpy as np
 import vxi11
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 
 
@@ -15,10 +16,15 @@ OSCILLOSCOPES = {
     "oscSi":  "10.9.9.102",
 }
 
+# OSCILLOSCOPES = {
+#     "oscLi6": "10.9.9.100",
+#     "oscB10": "10.9.9.102",
+#     "oscSi":  "10.9.9.101",
+# }
 
 # Filename prefix
 PREFIX = ""
-OUTDIR = "./data/CERF_2025_05_27_RUN0"
+OUTDIR = "./data/CERF_2025_05_27_RUN14a"
 
 
 CHANNEL = "CHAN1" 
@@ -120,13 +126,13 @@ def poll_trigger_and_frames(scopes):
             break
         time.sleep(0.5)
 
-def download_all_frames(sc, start_time, end_time, tag="main"):
+def download_all_frames(sc, start_time, end_time, tag="main", pbar=None):
     import sys
     import os
 
     channels = ["CHAN1", "CHAN2"]
     run_time = end_time
-    filename = start_time  # nebo použijte jiný identifikátor
+    filename = start_time
     start_wfd = 0.01
     wfd = start_wfd
 
@@ -144,22 +150,16 @@ def download_all_frames(sc, start_time, end_time, tag="main"):
 
         sc.write(":WAV:XINC?")
         xinc = float(sc.read(100))
-        print("XINC:", xinc)
         sc.write(":WAV:YINC?")
         yinc = float(sc.read(100))
-        print("YINC:", yinc)
         sc.write(":TRIGger:EDGe:LEVel?")
         trig = float(sc.read(100))
-        print("TRIG:", trig)
         sc.write(":WAVeform:YORigin?")
         yorig = float(sc.read(100))
-        print("YORIGIN:", yorig)
         sc.write(":WAVeform:XORigin?")
         xorig = float(sc.read(100))
-        print("XORIGIN:", xorig)
         sc.write(":FUNC:WREP:FEND?")
         frames = int(sc.read(100))
-        print("FRAMES:", frames, "SUBRUN", filename)
 
         lastwave = bytearray()
         os.makedirs(OUTDIR, exist_ok=True)
@@ -179,17 +179,13 @@ def download_all_frames(sc, start_time, end_time, tag="main"):
             hf.create_dataset("CHANNEL", data=channel)
             sc.write(":FUNC:WREP:FCUR 1")
             time.sleep(0.5)
-            for n in range(1, frames + 1):
+            for n in tqdm(range(1, frames + 1), desc=f"{sc.name}-{channel}", leave=False, disable=(pbar is not None)):
                 sc.write(f":FUNC:WREP:FCUR {n}")
                 while True:
                     time.sleep(0.05)
                     fcur = sc.ask(":FUNC:WREP:FCUR?").strip()
                     if str(n) == fcur:
-                        sys.stdout.write(str(n))
-                        sys.stdout.flush()
                         break
-                    else:
-                        print(f"Needwait: {n} vs {fcur}")
 
                 reread_count = 0
                 while True:
@@ -202,18 +198,16 @@ def download_all_frames(sc, start_time, end_time, tag="main"):
                     wave = np.concatenate((wave1[11:], wave2, wave3[:-1]))
                     if np.array_equal(wave, lastwave):
                         wfd += 0.005
-                        print(f" Same waveform, wait {wfd} and reread")
                         reread_count += 1
                         if reread_count > 5:
                             print("------------ Wrong trigger level?")
                     else:
                         hf.create_dataset(str(n), data=wave)
                         lastwave = wave
-                        sys.stdout.write(".")
-                        sys.stdout.flush()
+                        if pbar:
+                            pbar.update(1)
                         wfd = start_wfd
                         break
-        print("DOWNLOADING DONE")
         print(f"Saved {frames} frames to {h5name}")
 
 if __name__ == "__main__":
@@ -222,21 +216,8 @@ if __name__ == "__main__":
 
     print(scopes)
 
-    
     while True:
         try:
-       
-            # Před spuštěním mereni stáhni případné staré snímky
-            #print("Kontroluji existující frames před měřením...")
-            #pre_time = now_utc_str()
-            #for sc in scopes.values():
-            #     old_cnt = sc.get_frame_count()
-            #     if old_cnt > 0:
-            #         print(f"{sc.name}: Nalzeno {old_cnt} starých frame(s). Stahuji...")
-            #         download_all_frames(sc, pre_time, pre_time, tag="preexisting")
-            #     else:
-            #         print(f"{sc.name}: Žádné staré frames.")
-
             print("Spouštím měření na všech osciloskopech...")
             for sc in scopes.values():
                 sc.stop()
@@ -260,12 +241,29 @@ if __name__ == "__main__":
                 sc.stop()
             time.sleep(0.5)
 
-            print("Stahuji výsledné frames...")
-            for sc in scopes.values():
-                print(f"Stahuji frames z {sc.name}...")
-                download_all_frames(sc, start_time, end_time, tag=sc.name)
-            print("Hotovo.")
+            print("Stahuji výsledné frames paralelně...")
 
+            # Zjisti celkový počet snímků pro progress bar
+            total_frames = 0
+            for sc in scopes.values():
+                for ch in ["CHAN1", "CHAN2"]:
+                    disp = sc.ask(f":{ch}:DISP?").strip()
+                    if disp == "0":
+                        continue
+                    sc.write(":FUNC:WREP:FEND?")
+                    frames = int(sc.read(100))
+                    total_frames += frames
+
+            with tqdm(total=total_frames, desc="Celkem snímků") as pbar:
+                with ThreadPoolExecutor(max_workers=len(scopes)) as executor:
+                    futures = [
+                        executor.submit(download_all_frames, sc, start_time, end_time, sc.name, pbar)
+                        for sc in scopes.values()
+                    ]
+                    for future in as_completed(futures):
+                        future.result()
+
+            print("Hotovo.")
 
         except KeyboardInterrupt:
             print("Uživatel přerušil přípravu, ukončuji...")
