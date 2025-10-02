@@ -41,6 +41,10 @@ class RigolScope:
         drv_string = "TCPIP::{}::INSTR".format(ip)
         print("Connecting to OSC, ", drv_string)
         self.drv = vxi11.Instrument(drv_string)
+        
+        # Optimalizace timeoutů pro rychlejší komunikaci
+        self.drv.timeout = 5000  # 5s timeout (místo defaultních 25s)
+        
         self.getName()
     
     def write(self, cmd):
@@ -158,22 +162,20 @@ def download_all_frames(sc, start_time, end_time, tag="main", pbar=None, channel
             continue
         print(f"{sc.name}: Reading out {channel}")
 
-        # copling = sc.ask(f":{channel}:COUP?").strip()
-
+        # Configure waveform source and format
         sc.write(f":WAV:SOUR {channel}")
         sc.write(":WAV:MODE NORM")
         sc.write(":WAV:FORM BYTE")
         sc.write(":WAV:POIN 1400")
 
+        # Read measurement parameters
         sc.write(":WAV:XINC?")
         xinc = float(sc.read(100))
         sc.write(":WAV:YINC?")
         yinc = float(sc.read(100))
         sc.write(":TRIGger:EDGe:LEVel?")
-        trig = float(sc.read(100))
-        
+        trig_level = float(sc.read(100))
         trig_channel = sc.ask(":TRIGger:EDGe:SOUR?").strip()
-
         sc.write(":WAVeform:YORigin?")
         yorig = float(sc.read(100))
         sc.write(":WAVeform:XORigin?")
@@ -181,56 +183,74 @@ def download_all_frames(sc, start_time, end_time, tag="main", pbar=None, channel
         sc.write(":FUNC:WREP:FEND?")
         frames = int(sc.read(100))
 
-
         lastwave = bytearray()
         os.makedirs(OUTDIR, exist_ok=True)
         h5name = f"{OUTDIR}/{filename}_{sc.name}_{channel}.h5"
+        
         with h5py.File(h5name, "w") as hf:
-            hf.attrs["FRAMES"] = frames - 1  # remove 1 frame, because first is trigger time mark frame
+            # Waveform parameters
+            hf.attrs["FRAMES"] = frames
             hf.attrs["XINC"] = xinc
             hf.attrs["YINC"] = yinc
-            hf.attrs["TRIG"] = trig
-            hf.attrs["TRIG_CHANNEL"] = trig_channel
             hf.attrs["YORIGIN"] = yorig
             hf.attrs["XORIGIN"] = xorig
+            
+            # Trigger parameters
+            hf.attrs["TRIG_LEVEL"] = trig_level
+            hf.attrs["TRIG_CHANNEL"] = trig_channel
+            
+            # Time information
             hf.attrs["CAPTURING"] = run_time
             hf.attrs["START_TIME"] = start_time.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
             hf.attrs["START_TIMESTAMP"] = start_time.timestamp()
             hf.attrs["END_TIME"] = end_time.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
             hf.attrs["END_TIMESTAMP"] = end_time.timestamp()
+            
+            # Instrument information
             hf.attrs["SCOPE_NAME"] = sc.name
             hf.attrs["IP"] = sc.ip
             hf.attrs["CHANNEL"] = channel
             
-            sc.write(":FUNC:WREP:FCUR 2")
+            sc.write(":FUNC:WREP:FCUR 1")
             time.sleep(0.5)
 
+            # Přečti preamble jednou pro všechny framy (nemění se mezi framy)
+            preamble = sc.ask(":WAV:PRE?").strip()
+            
             # Zaciname od snimku 2, protoze 1 je jiz nacteny triggerem pro zaznamenani casu nula. 
-            for n in tqdm(range(2, frames), desc=f"{sc.name}-{channel}", leave=False, disable=(pbar is not None)):
+            for n in tqdm(range(1, frames), desc=f"{sc.name}-{channel}", leave=False, disable=(pbar is not None)):
                 sc.write(f":FUNC:WREP:FCUR {n}")
+                
+                # Efektivnější čekání na přepnutí framu
                 while True:
-                    time.sleep(0.05)
+                    time.sleep(0.02)
                     fcur = sc.ask(":FUNC:WREP:FCUR?").strip()
                     if str(n) == fcur:
                         break
 
                 reread_count = 0
                 ctag = float(eval(sc.ask(":FUNCtion:WREPlay:CTAG?")))
+                
                 while True:
+                    # Pouze jedno sleep před čtením dat
                     time.sleep(wfd)
                     sc.write(":WAV:DATA?")
-                    time.sleep(wfd)
-                    wave1 = bytearray(sc.drv.read_raw(500))
-                    wave2 = bytearray(sc.drv.read_raw(500))
-                    wave3 = bytearray(sc.drv.read_raw(500))
-                    wave = np.concatenate((wave1[11:], wave2, wave3[:-1]))
+                    
+                    # Čti data najednou místo po částech
+                    full_data = bytearray(sc.drv.read_raw(1500))
+                    
+                    if full_data.startswith(b'#'):
+                        header_len = 2 + int(full_data[1:2])
+                        wave = full_data[header_len:-1]
+                    else:
+                        wave = full_data[11:-1]
+                    
                     if np.array_equal(wave, lastwave):
-                        wfd += 0.005
+                        wfd += 0.003
                         reread_count += 1
                         if reread_count > 5:
                             print("------------ Wrong trigger level?")
                     else:
-                        print(len(wave), "bytes read")
                         dset = hf.create_dataset(str(n), data=wave)
                         dset.attrs["frame_index"] = n
                         dset.attrs["channel"] = channel
@@ -238,7 +258,7 @@ def download_all_frames(sc, start_time, end_time, tag="main", pbar=None, channel
                         dset.attrs["CTAG"] = ctag
                         dset.attrs["TRG_TIME"] = (start_time + timedelta(seconds=ctag)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
                         dset.attrs["TRG_TIMESTAMP"] = (start_time + timedelta(seconds=ctag)).timestamp()
-                        dset.attrs["preamble"] = sc.ask(":WAV:PRE?").strip()
+                        dset.attrs["preamble"] = preamble
                         lastwave = wave
                         if pbar:
                             pbar.update(1)
