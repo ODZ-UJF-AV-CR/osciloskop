@@ -142,11 +142,10 @@ def poll_trigger_and_frames(scopes, max_integration_time=None):
             
         time.sleep(0.5)
 
-def download_all_frames(sc, start_time, end_time, tag="main", pbar=None):
+def download_all_frames(sc, start_time, end_time, tag="main", pbar=None, channels=["CHAN1", "CHAN2"]):
     import sys
     import os
 
-    channels = ["CHAN1", "CHAN2"]
     run_time = (end_time - start_time).total_seconds()
     filename = start_time.strftime("%Y%m%d_%H%M%S")
     start_wfd = 0.01
@@ -159,7 +158,7 @@ def download_all_frames(sc, start_time, end_time, tag="main", pbar=None):
             continue
         print(f"{sc.name}: Reading out {channel}")
 
-        copling = sc.ask(f":{channel}:COUP?").strip()
+        # copling = sc.ask(f":{channel}:COUP?").strip()
 
         sc.write(f":WAV:SOUR {channel}")
         sc.write(":WAV:MODE NORM")
@@ -182,27 +181,27 @@ def download_all_frames(sc, start_time, end_time, tag="main", pbar=None):
         sc.write(":FUNC:WREP:FEND?")
         frames = int(sc.read(100))
 
-        print(f" XINC={xinc} YINC={yinc} TRIG={trig} COUP={copling} TRIG_CH={trig_channel}")
 
         lastwave = bytearray()
         os.makedirs(OUTDIR, exist_ok=True)
         h5name = f"{OUTDIR}/{filename}_{sc.name}_{channel}.h5"
         with h5py.File(h5name, "w") as hf:
-            hf.create_dataset("FRAMES", data=frames)
-            hf.create_dataset("XINC", data=xinc)
-            hf.create_dataset("YINC", data=yinc)
-            hf.create_dataset("TRIG", data=trig)
-            hf.create_dataset("TRIG_CHANNEL", data=trig_channel)
-            hf.create_dataset("YORIGIN", data=yorig)
-            hf.create_dataset("XORIGIN", data=xorig)
-            hf.create_dataset("CAPTURING", data=run_time)
-            hf.create_dataset("START_TIME", data=start_time.strftime("%Y-%m-%dT%H:%M:%S.%fZ"))
-            hf.create_dataset("START_TIMESTAMP", data=start_time.timestamp())
-            hf.create_dataset("END_TIME", data=end_time.strftime("%Y-%m-%dT%H:%M:%S.%fZ"))
-            hf.create_dataset("END_TIMESTAMP", data=end_time.timestamp())
-            hf.create_dataset("SCOPE_NAME", data=sc.name)
-            hf.create_dataset("IP", data=sc.ip)
-            hf.create_dataset("CHANNEL", data=channel)
+            hf.attrs["FRAMES"] = frames - 1  # remove 1 frame, because first is trigger time mark frame
+            hf.attrs["XINC"] = xinc
+            hf.attrs["YINC"] = yinc
+            hf.attrs["TRIG"] = trig
+            hf.attrs["TRIG_CHANNEL"] = trig_channel
+            hf.attrs["YORIGIN"] = yorig
+            hf.attrs["XORIGIN"] = xorig
+            hf.attrs["CAPTURING"] = run_time
+            hf.attrs["START_TIME"] = start_time.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+            hf.attrs["START_TIMESTAMP"] = start_time.timestamp()
+            hf.attrs["END_TIME"] = end_time.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+            hf.attrs["END_TIMESTAMP"] = end_time.timestamp()
+            hf.attrs["SCOPE_NAME"] = sc.name
+            hf.attrs["IP"] = sc.ip
+            hf.attrs["CHANNEL"] = channel
+            
             sc.write(":FUNC:WREP:FCUR 2")
             time.sleep(0.5)
 
@@ -231,7 +230,6 @@ def download_all_frames(sc, start_time, end_time, tag="main", pbar=None):
                         if reread_count > 5:
                             print("------------ Wrong trigger level?")
                     else:
-
                         print(len(wave), "bytes read")
                         dset = hf.create_dataset(str(n), data=wave)
                         dset.attrs["frame_index"] = n
