@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import time
-from datetime import datetime, UTC
+from datetime import datetime, UTC, timezone, timedelta
 import h5py
 import numpy as np
 import vxi11
@@ -11,9 +11,9 @@ from tqdm import tqdm
 
 
 OSCILLOSCOPES = {
-    "oscLi6": "10.9.9.101",
-    "oscB10": "10.9.9.100",
-    "oscSi":  "10.9.9.102",
+    "osc1": "10.42.0.19",
+#    "osc2": "192.168.1.182",
+    #"oscSi":  "10.9.9.102",
 }
 
 # OSCILLOSCOPES = {
@@ -24,10 +24,12 @@ OSCILLOSCOPES = {
 
 # Filename prefix
 PREFIX = ""
-OUTDIR = "./data/CERF_2025_05_27_RUN14a"
+OUTDIR = "./data/TEST"
 
+# Maximální doba měření v sekundách (None = neomezeno, 120 = 2 minuty)
+MAX_MEASUREMENT_TIME = 120  # Nastav na None pro neomezenou dobu
 
-CHANNEL = "CHAN1" 
+CHANNEL = "CHAN1"
 
 def now_utc_str():
     return datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
@@ -102,28 +104,42 @@ class RigolScope:
             f.attrs["ip"] = self.ip
             f.attrs["frame_index"] = frame_idx
             f.attrs["preamble"] = preamble
-            f.attrs["start_time_utc"] = start_time
+            f.attrs["start_time_utc"] = start_time.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
             f.attrs["end_time_utc"] = end_time
 
-def poll_trigger_and_frames(scopes):
+def poll_trigger_and_frames(scopes, max_integration_time=None):
     print("Polling stav triggeru a počtu frames...")
+    start_timestamp = time.time()
+    
     while True:
         stop_detected = False
         statuses = []
-        frame_counts = []
+        
+        # Zkontroluj, jestli už neuplynul maximální čas (pouze pokud je nastaven)
+        if max_integration_time is not None:
+            elapsed_time = time.time() - start_timestamp
+            if elapsed_time >= max_integration_time:
+                print(f"Dosažen maximální čas měření ({max_integration_time} sekund), ukončuji...")
+                return "timeout"
+            
         for name, sc in scopes.items():
             trig = sc.get_trigger_status()
-            #frames = sc.get_frame_count()
             statuses.append(f"{name}: {trig}")
-            #frame_counts.append(f"{name}: {frames} frames")
-            #print( frame_counts )
-            #if trig.upper() != "RUN" and trig.upper() != "WAIT" and trig.upper() != "TB":
             if trig.upper() == "STOP":
                 stop_detected = True
-        print(" | ".join(statuses)) # "||", " | ".join(frame_counts))
+                
+        # Zobraz zbývající čas (pouze pokud je limit nastaven)
+        if max_integration_time is not None:
+            elapsed_time = time.time() - start_timestamp
+            remaining_time = max_integration_time - elapsed_time
+            print(" | ".join(statuses) + f" | Zbývá: {remaining_time:.1f}s")
+        else:
+            print(" | ".join(statuses))
+        
         if stop_detected:
             print("Akvizice je zastavena na některém osciloskopu.")
-            break
+            return "stopped"
+            
         time.sleep(0.5)
 
 def download_all_frames(sc, start_time, end_time, tag="main", pbar=None):
@@ -131,8 +147,8 @@ def download_all_frames(sc, start_time, end_time, tag="main", pbar=None):
     import os
 
     channels = ["CHAN1", "CHAN2"]
-    run_time = end_time
-    filename = start_time
+    run_time = (end_time - start_time).total_seconds()
+    filename = start_time.strftime("%Y%m%d_%H%M%S")
     start_wfd = 0.01
     wfd = start_wfd
 
@@ -142,6 +158,8 @@ def download_all_frames(sc, start_time, end_time, tag="main", pbar=None):
             print(f"{sc.name}: {channel} is not enabled")
             continue
         print(f"{sc.name}: Reading out {channel}")
+
+        copling = sc.ask(f":{channel}:COUP?").strip()
 
         sc.write(f":WAV:SOUR {channel}")
         sc.write(":WAV:MODE NORM")
@@ -154,6 +172,9 @@ def download_all_frames(sc, start_time, end_time, tag="main", pbar=None):
         yinc = float(sc.read(100))
         sc.write(":TRIGger:EDGe:LEVel?")
         trig = float(sc.read(100))
+        
+        trig_channel = sc.ask(":TRIGger:EDGe:SOUR?").strip()
+
         sc.write(":WAVeform:YORigin?")
         yorig = float(sc.read(100))
         sc.write(":WAVeform:XORigin?")
@@ -161,25 +182,32 @@ def download_all_frames(sc, start_time, end_time, tag="main", pbar=None):
         sc.write(":FUNC:WREP:FEND?")
         frames = int(sc.read(100))
 
+        print(f" XINC={xinc} YINC={yinc} TRIG={trig} COUP={copling} TRIG_CH={trig_channel}")
+
         lastwave = bytearray()
         os.makedirs(OUTDIR, exist_ok=True)
-        h5name = f"{OUTDIR}/{PREFIX}data_{sc.name}_{filename}.h5"
+        h5name = f"{OUTDIR}/{filename}_{sc.name}_{channel}.h5"
         with h5py.File(h5name, "w") as hf:
             hf.create_dataset("FRAMES", data=frames)
             hf.create_dataset("XINC", data=xinc)
             hf.create_dataset("YINC", data=yinc)
             hf.create_dataset("TRIG", data=trig)
+            hf.create_dataset("TRIG_CHANNEL", data=trig_channel)
             hf.create_dataset("YORIGIN", data=yorig)
             hf.create_dataset("XORIGIN", data=xorig)
             hf.create_dataset("CAPTURING", data=run_time)
-            hf.create_dataset("START_TIME", data=start_time)
-            hf.create_dataset("END_TIME", data=end_time)
+            hf.create_dataset("START_TIME", data=start_time.strftime("%Y-%m-%dT%H:%M:%S.%fZ"))
+            hf.create_dataset("START_TIMESTAMP", data=start_time.timestamp())
+            hf.create_dataset("END_TIME", data=end_time.strftime("%Y-%m-%dT%H:%M:%S.%fZ"))
+            hf.create_dataset("END_TIMESTAMP", data=end_time.timestamp())
             hf.create_dataset("SCOPE_NAME", data=sc.name)
             hf.create_dataset("IP", data=sc.ip)
             hf.create_dataset("CHANNEL", data=channel)
-            sc.write(":FUNC:WREP:FCUR 1")
+            sc.write(":FUNC:WREP:FCUR 2")
             time.sleep(0.5)
-            for n in tqdm(range(1, frames + 1), desc=f"{sc.name}-{channel}", leave=False, disable=(pbar is not None)):
+
+            # Zaciname od snimku 2, protoze 1 je jiz nacteny triggerem pro zaznamenani casu nula. 
+            for n in tqdm(range(2, frames), desc=f"{sc.name}-{channel}", leave=False, disable=(pbar is not None)):
                 sc.write(f":FUNC:WREP:FCUR {n}")
                 while True:
                     time.sleep(0.05)
@@ -188,6 +216,7 @@ def download_all_frames(sc, start_time, end_time, tag="main", pbar=None):
                         break
 
                 reread_count = 0
+                ctag = float(eval(sc.ask(":FUNCtion:WREPlay:CTAG?")))
                 while True:
                     time.sleep(wfd)
                     sc.write(":WAV:DATA?")
@@ -202,7 +231,16 @@ def download_all_frames(sc, start_time, end_time, tag="main", pbar=None):
                         if reread_count > 5:
                             print("------------ Wrong trigger level?")
                     else:
-                        hf.create_dataset(str(n), data=wave)
+
+                        print(len(wave), "bytes read")
+                        dset = hf.create_dataset(str(n), data=wave)
+                        dset.attrs["frame_index"] = n
+                        dset.attrs["channel"] = channel
+                        dset.attrs["scope_name"] = sc.name
+                        dset.attrs["CTAG"] = ctag
+                        dset.attrs["TRG_TIME"] = (start_time + timedelta(seconds=ctag)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+                        dset.attrs["TRG_TIMESTAMP"] = (start_time + timedelta(seconds=ctag)).timestamp()
+                        dset.attrs["preamble"] = sc.ask(":WAV:PRE?").strip()
                         lastwave = wave
                         if pbar:
                             pbar.update(1)
@@ -218,6 +256,8 @@ if __name__ == "__main__":
 
     while True:
         try:
+
+            # sc.write(":FUNCtion:WREPlay:TTAG 1")
             print("Spouštím měření na všech osciloskopech...")
             for sc in scopes.values():
                 sc.stop()
@@ -225,21 +265,28 @@ if __name__ == "__main__":
             time.sleep(0.5)
             for sc in scopes.values():
                 sc.run()
+                sc.write(":TFORce")
+
+
+            start_time = datetime.now(timezone.utc)
             time.sleep(0.5)
 
-            start_time = now_utc_str()
             print("Polling průběhu měření (CTRL+C = přerušení)...")
             try:
-                poll_trigger_and_frames(scopes)
+                result = poll_trigger_and_frames(scopes, MAX_MEASUREMENT_TIME)
             except KeyboardInterrupt:
-                print("Přerušeno uživatelem, ukončuji...")
+                print("Přerušeno uživatelem, dokončuji současné měření a pokračuji...")
+                result = "interrupted"
 
-            end_time = now_utc_str()
+            
+            end_time = datetime.now(timezone.utc)
 
             print("Zastavuji měření na všech osciloskopech...")
             for sc in scopes.values():
                 sc.stop()
             time.sleep(0.5)
+            
+            print(f"Měření dokončeno ({result}), pokračuji stažením dat...")
 
             print("Stahuji výsledné frames paralelně...")
 
@@ -263,11 +310,11 @@ if __name__ == "__main__":
                     for future in as_completed(futures):
                         future.result()
 
-            print("Hotovo.")
+            print("Hotovo. Spouštím nové měření..")
 
         except KeyboardInterrupt:
-            print("Uživatel přerušil přípravu, ukončuji...")
-            exit(0)
+            print("Uživatel přerušil aplikaci, ukončuji...")
+            break
         except Exception as e:
             print(f"Chyba: {e}")
             time.sleep(1)
