@@ -2,15 +2,17 @@
 # -*- coding: utf-8 -*-
 """
 Capture waveform frames from one or more Rigol oscilloscopes.
+Channels from one scope are stored as groups inside one HDF5 file.
 
 Examples:
-    python3 vxi_capture_multiple.py --scope osc1=192.168.1.224 --run-once
+    python3 vxi_capture_multiple.py --scope osc1=192.168.1.224 --measurement-name test_01 --run-once
     python3 vxi_capture_multiple.py --scope osc1=192.168.1.224 --scope osc2=192.168.1.182 \
-        --outdir ~/captures/test --samples 14000 --max-measurement-time 15 \
-        --channel CHAN1 --channel CHAN2
+        --outdir ~/captures/test --samples 14000 --max-measurement-time 300 \
+        --measurement-name americium_run --channel CHAN1 --channel CHAN2
 """
 
 import argparse
+import os
 import os
 import time
 from datetime import datetime, UTC, timezone, timedelta
@@ -36,11 +38,15 @@ DEFAULT_OSCILLOSCOPES = {
 DEFAULT_OUTDIR = "~/log_spacedos01B/PIND02_Si_Americium_2"
 DEFAULT_HIGH_RES = True
 DEFAULT_SAMPLES = 14000  # musi byt nastaveno stejne cislo v osciloskopech
-DEFAULT_MAX_MEASUREMENT_TIME = 2.5
+DEFAULT_MAX_MEASUREMENT_TIME = 5 * 60
 DEFAULT_CHANNELS = ["CHAN1", "CHAN2"]
 
 def now_utc_str():
     return datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+
+def sanitize_measurement_name(name):
+    safe = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in name.strip())
+    return safe.strip("_")
 
 def parse_scope(scope_arg):
     if "=" not in scope_arg:
@@ -90,6 +96,11 @@ def parse_args():
         help="Kanal ke stazeni, napr. CHAN1. Lze zadat vicekrat. Default: CHAN1, CHAN2",
     )
     parser.add_argument(
+        "--measurement-name",
+        default="",
+        help="Jmeno mereni pouzite v nazvech vystupnich souboru.",
+    )
+    parser.add_argument(
         "--high-res",
         dest="high_res",
         action="store_true",
@@ -111,6 +122,7 @@ def parse_args():
     args.scopes = dict(args.scope) if args.scope else DEFAULT_OSCILLOSCOPES.copy()
     args.channels = args.channels or DEFAULT_CHANNELS.copy()
     args.outdir = os.path.expanduser(args.outdir)
+    args.measurement_name = sanitize_measurement_name(args.measurement_name)
     return args
 
 class RigolScope:
@@ -193,37 +205,39 @@ class RigolScope:
 def poll_trigger_and_frames(scopes, max_integration_time=None):
     print("Polling stav triggeru a počtu frames...")
     start_timestamp = time.time()
-    
-    while True:
-        stop_detected = False
-        statuses = []
-        
-        # Zkontroluj, jestli už neuplynul maximální čas (pouze pokud je nastaven)
-        if max_integration_time is not None:
+
+    with tqdm(total=max_integration_time, desc="Mereni", unit="s", leave=False) as status_bar:
+        while True:
+            stop_detected = False
+            statuses = []
+
             elapsed_time = time.time() - start_timestamp
-            if elapsed_time >= max_integration_time:
-                print(f"Dosažen maximální čas měření ({max_integration_time} sekund), ukončuji...")
+            if max_integration_time is not None and elapsed_time >= max_integration_time:
+                status_bar.update(max(0, max_integration_time - status_bar.n))
+                status_bar.set_postfix_str("timeout")
+                tqdm.write(f"Dosažen maximální čas měření ({max_integration_time} sekund), ukončuji...")
                 return "timeout"
-            
-        for name, sc in scopes.items():
-            trig = sc.get_trigger_status()
-            statuses.append(f"{name}: {trig}")
-            if trig.upper() == "STOP":
-                stop_detected = True
-                
-        # Zobraz zbývající čas (pouze pokud je limit nastaven)
-        if max_integration_time is not None:
+
+            for name, sc in scopes.items():
+                trig = sc.get_trigger_status()
+                statuses.append(f"{name}: {trig}")
+                if trig.upper() == "STOP":
+                    stop_detected = True
+
             elapsed_time = time.time() - start_timestamp
-            remaining_time = max_integration_time - elapsed_time
-            print(" | ".join(statuses) + f" | Zbývá: {remaining_time:.1f}s")
-        else:
-            print(" | ".join(statuses))
-        
-        if stop_detected:
-            print("Akvizice je zastavena na některém osciloskopu.")
-            return "stopped"
-            
-        time.sleep(0.5)
+            status_bar.update(max(0, elapsed_time - status_bar.n))
+            status_text = " | ".join(statuses)
+            if max_integration_time is not None:
+                remaining_time = max(0.0, max_integration_time - elapsed_time)
+                status_bar.set_postfix_str(f"{status_text} | zbyva: {remaining_time:.1f}s")
+            else:
+                status_bar.set_postfix_str(status_text)
+
+            if stop_detected:
+                tqdm.write("Akvizice je zastavena na některém osciloskopu.")
+                return "stopped"
+
+            time.sleep(0.5)
 
 def download_all_frames(
     sc,
@@ -232,6 +246,7 @@ def download_all_frames(
     outdir,
     samples,
     high_res,
+    measurement_name,
     tag="main",
     pbar=None,
     channels=None,
@@ -239,75 +254,74 @@ def download_all_frames(
     channels = channels or DEFAULT_CHANNELS
     run_time = (end_time - start_time).total_seconds()
     filename = start_time.strftime("%Y%m%d_%H%M%S")
+    if measurement_name:
+        filename = f"{filename}_{measurement_name}"
     start_wfd = 0.01
-    wfd = start_wfd
     waveform_mode = "MAX" if high_res else "NORM"
     waveform_points = samples if high_res else 7000
+    os.makedirs(outdir, exist_ok=True)
+    h5name = f"{outdir}/{filename}_{sc.name}.h5"
+    saved_channels = []
 
-    for channel in channels:
-        disp = sc.ask(f":{channel}:DISP?").strip()
-        if disp == "0":
-            print(f"{sc.name}: {channel} is not enabled")
-            continue
-        print(f"{sc.name}: Reading out {channel}")
+    with h5py.File(h5name, "w") as hf:
+        hf.attrs["CAPTURING"] = run_time
+        hf.attrs["START_TIME"] = start_time.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        hf.attrs["START_TIMESTAMP"] = start_time.timestamp()
+        hf.attrs["END_TIME"] = end_time.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        hf.attrs["END_TIMESTAMP"] = end_time.timestamp()
+        hf.attrs["SCOPE_NAME"] = sc.name
+        hf.attrs["IP"] = sc.ip
+        hf.attrs["MEASUREMENT_NAME"] = measurement_name
 
-        # Configure waveform source and format
-        sc.write(f":WAV:SOUR {channel}")
-        sc.write(":WAV:FORM BYTE")
-        sc.write(f":WAV:MODE {waveform_mode}") # NORM, MAXimum, RAW
-        sc.write(f":WAV:POIN {waveform_points}")
+        for channel in channels:
+            disp = sc.ask(f":{channel}:DISP?").strip()
+            if disp == "0":
+                tqdm.write(f"{sc.name}: {channel} is not enabled")
+                continue
+            tqdm.write(f"{sc.name}: Reading out {channel}")
+            wfd = start_wfd
+            lastwave = bytearray()
 
-        # Read measurement parameters
-        sc.write(":WAV:XINC?")
-        xinc = float(sc.read(100))
-        sc.write(":WAV:YINC?")
-        yinc = float(sc.read(100))
-        sc.write(":TRIGger:EDGe:LEVel?")
-        trig_level = float(sc.read(100))
-        trig_channel = sc.ask(":TRIGger:EDGe:SOUR?").strip()
-        sc.write(":WAVeform:YORigin?")
-        yorig = float(sc.read(100))
-        sc.write(":WAVeform:XORigin?")
-        xorig = float(sc.read(100))
-        sc.write(":FUNC:WREP:FEND?")
-        frames = int(sc.read(100))
+            # Configure waveform source and format
+            sc.write(f":WAV:SOUR {channel}")
+            sc.write(":WAV:FORM BYTE")
+            sc.write(f":WAV:MODE {waveform_mode}") # NORM, MAXimum, RAW
+            sc.write(f":WAV:POIN {waveform_points}")
 
-        lastwave = bytearray()
-        os.makedirs(outdir, exist_ok=True)
-        h5name = f"{outdir}/{filename}_{sc.name}_{channel}.h5"
-        
-        with h5py.File(h5name, "w") as hf:
-            # Waveform parameters
-            hf.attrs["FRAMES"] = frames
-            hf.attrs["XINC"] = xinc
-            hf.attrs["YINC"] = yinc
-            hf.attrs["YORIGIN"] = yorig
-            hf.attrs["XORIGIN"] = xorig
-            
-            # Trigger parameters
-            hf.attrs["TRIG_LEVEL"] = trig_level
-            hf.attrs["TRIG_CHANNEL"] = trig_channel
-            
-            # Time information
-            hf.attrs["CAPTURING"] = run_time
-            hf.attrs["START_TIME"] = start_time.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-            hf.attrs["START_TIMESTAMP"] = start_time.timestamp()
-            hf.attrs["END_TIME"] = end_time.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-            hf.attrs["END_TIMESTAMP"] = end_time.timestamp()
-            
-            # Instrument information
-            hf.attrs["SCOPE_NAME"] = sc.name
-            hf.attrs["IP"] = sc.ip
-            hf.attrs["CHANNEL"] = channel
-            
+            # Read measurement parameters
+            sc.write(":WAV:XINC?")
+            xinc = float(sc.read(100))
+            sc.write(":WAV:YINC?")
+            yinc = float(sc.read(100))
+            sc.write(":TRIGger:EDGe:LEVel?")
+            trig_level = float(sc.read(100))
+            trig_channel = sc.ask(":TRIGger:EDGe:SOUR?").strip()
+            sc.write(":WAVeform:YORigin?")
+            yorig = float(sc.read(100))
+            sc.write(":WAVeform:XORigin?")
+            xorig = float(sc.read(100))
+            sc.write(":FUNC:WREP:FEND?")
+            frames = int(sc.read(100))
+
+            channel_group = hf.create_group(channel)
+            saved_channels.append(channel)
+            channel_group.attrs["FRAMES"] = frames
+            channel_group.attrs["XINC"] = xinc
+            channel_group.attrs["YINC"] = yinc
+            channel_group.attrs["YORIGIN"] = yorig
+            channel_group.attrs["XORIGIN"] = xorig
+            channel_group.attrs["TRIG_LEVEL"] = trig_level
+            channel_group.attrs["TRIG_CHANNEL"] = trig_channel
+            channel_group.attrs["CHANNEL"] = channel
+
             sc.write(":FUNC:WREP:FCUR 1")
             time.sleep(0.2)
 
             preamble = sc.ask(":WAV:PRE?").strip()
-            
+
             for n in tqdm(range(1, frames+1), desc=f"{sc.name}-{channel}", leave=False, disable=(pbar is not None)):
                 sc.write(f":FUNC:WREP:FCUR {n}")
-                
+
                 # Efektivnější čekání na přepnutí framu s timeoutem
                 frame_switch_timeout = 50  # maximálně 50 pokusů
                 frame_switch_count = 0
@@ -318,7 +332,7 @@ def download_all_frames(
                         break
                     frame_switch_count += 1
                     if frame_switch_count > frame_switch_timeout:
-                        print(f"Timeout při přepínání na frame {n}, přeskakuji")
+                        tqdm.write(f"Timeout při přepínání na frame {n}, přeskakuji")
                         break
 
                 reread_count = 0
@@ -344,9 +358,11 @@ def download_all_frames(
                         wfd += 0.003
                         reread_count += 1
                         if reread_count > 10:
-                            print(f"------------ Frame {n}: Opakované čtení identických dat (možná špatný trigger level), přeskakuji frame")
+                            tqdm.write(
+                                f"Frame {n}: Opakované čtení identických dat, přeskakuji frame"
+                            )
                             # Ulož prázdný dataset nebo poslední dostupná data
-                            dset = hf.create_dataset(str(n), data=wave)
+                            dset = channel_group.create_dataset(str(n), data=wave)
                             dset.attrs["frame_index"] = n
                             dset.attrs["channel"] = channel
                             dset.attrs["scope_name"] = sc.name
@@ -359,7 +375,7 @@ def download_all_frames(
                                 pbar.update(1)
                             break
                     else:
-                        dset = hf.create_dataset(str(n), data=wave)
+                        dset = channel_group.create_dataset(str(n), data=wave)
                         dset.attrs["frame_index"] = n
                         dset.attrs["channel"] = channel
                         dset.attrs["scope_name"] = sc.name
@@ -373,7 +389,7 @@ def download_all_frames(
                         wfd = start_wfd  # Reset delay pro další frame
                         reread_count = 0  # Reset počítadla pro další frame
                         break
-        print(f"Saved {frames} frames to {h5name}")
+    tqdm.write(f"Saved channels {', '.join(saved_channels)} to {h5name}")
 
 if __name__ == "__main__":
     args = parse_args()
@@ -402,6 +418,8 @@ if __name__ == "__main__":
 
             # sc.write(":FUNCtion:WREPlay:TTAG 1")
             print("Spouštím měření na všech osciloskopech...")
+            if args.measurement_name:
+                print(f"Jmeno mereni: {args.measurement_name}")
             for sc in scopes.values():
                 sc.stop()
                 sc.set_rec_mode("RECORD")
@@ -455,6 +473,7 @@ if __name__ == "__main__":
                             args.outdir,
                             args.samples,
                             args.high_res,
+                            args.measurement_name,
                             sc.name,
                             pbar,
                             args.channels,

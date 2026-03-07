@@ -6,10 +6,12 @@ It was writen and tested with RIGOL DS2102A.
 
 ## vxi_capture_multiple.py
 Script `vxi_capture_multiple.py` umi spoustet opakovana mereni nebo jedno mereni pres `--run-once`.
+Defaultni `--max-measurement-time` je 300 sekund, tedy 5 minut.
+Kanaly jednoho osciloskopu se ukladaji do jednoho HDF5 souboru, kazdy jako vlastni skupina.
 
 Zakladni pouziti:
 ```bash
-python3 vxi_capture_multiple.py --scope osc1=192.168.1.224 --run-once
+python3 vxi_capture_multiple.py --scope osc1=192.168.1.224 --measurement-name test_01 --run-once
 ```
 
 Priklad s vice parametry:
@@ -19,7 +21,8 @@ python3 vxi_capture_multiple.py \
   --scope osc2=192.168.1.182 \
   --outdir ~/captures/test \
   --samples 14000 \
-  --max-measurement-time 15 \
+  --max-measurement-time 300 \
+  --measurement-name americium_run \
   --channel CHAN1 \
   --channel CHAN2 \
   --run-once
@@ -30,6 +33,7 @@ Podporovane argumenty:
 - `--outdir PATH` pro vystupni adresar
 - `--samples N` pro pocet vzorku
 - `--max-measurement-time SECONDS` pro maximalni dobu mereni
+- `--measurement-name NAME` pro pojmenovani mereni a vystupnich souboru
 - `--channel CHANx` pro vyber kanalu, lze zadat vicekrat
 - `--high-res` nebo `--normal-res` pro rezim cteni waveformu
 - `--run-once` pro ukonceni skriptu po jednom cyklu
