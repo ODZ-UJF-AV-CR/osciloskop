@@ -1,6 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+Capture waveform frames from one or more Rigol oscilloscopes.
 
+Examples:
+    python3 vxi_capture_multiple.py --scope osc1=192.168.1.224 --run-once
+    python3 vxi_capture_multiple.py --scope osc1=192.168.1.224 --scope osc2=192.168.1.182 \
+        --outdir ~/captures/test --samples 14000 --max-measurement-time 15 \
+        --channel CHAN1 --channel CHAN2
+"""
+
+import argparse
+import os
 import time
 from datetime import datetime, UTC, timezone, timedelta
 import h5py
@@ -10,7 +21,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 
 
-OSCILLOSCOPES = {
+DEFAULT_OSCILLOSCOPES = {
     "osc1": "192.168.1.224",
 #    "osc2": "192.168.1.182",
     #"oscSi":  "10.9.9.102",
@@ -22,19 +33,85 @@ OSCILLOSCOPES = {
 #     "oscSi":  "10.9.9.101",
 # }
 
-# Filename prefix
-PREFIX = ""
-OUTDIR = "~/log_spacedos01B/PIND02_Si_Americium_2"
-
-high_res = True
-samples = 14000 # musi byt nastaveno stejne cislo v osciloskopech
-MAX_MEASUREMENT_TIME = 15*60
-MAX_MEASUREMENT_TIME = 2.5
-
-CHANNEL = "CHAN1"
+DEFAULT_OUTDIR = "~/log_spacedos01B/PIND02_Si_Americium_2"
+DEFAULT_HIGH_RES = True
+DEFAULT_SAMPLES = 14000  # musi byt nastaveno stejne cislo v osciloskopech
+DEFAULT_MAX_MEASUREMENT_TIME = 2.5
+DEFAULT_CHANNELS = ["CHAN1", "CHAN2"]
 
 def now_utc_str():
     return datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+
+def parse_scope(scope_arg):
+    if "=" not in scope_arg:
+        raise argparse.ArgumentTypeError(
+            f"Neplatny format osciloskopu '{scope_arg}', ocekavam NAME=IP."
+        )
+    name, ip = scope_arg.split("=", 1)
+    name = name.strip()
+    ip = ip.strip()
+    if not name or not ip:
+        raise argparse.ArgumentTypeError(
+            f"Neplatny format osciloskopu '{scope_arg}', ocekavam NAME=IP."
+        )
+    return name, ip
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Capture waveform frames from one or more Rigol oscilloscopes."
+    )
+    parser.add_argument(
+        "--scope",
+        action="append",
+        type=parse_scope,
+        help="Osciloskop ve formatu NAME=IP. Lze zadat vicekrat.",
+    )
+    parser.add_argument(
+        "--outdir",
+        default=DEFAULT_OUTDIR,
+        help=f"Vystupni adresar pro HDF5 soubory. Default: {DEFAULT_OUTDIR}",
+    )
+    parser.add_argument(
+        "--samples",
+        type=int,
+        default=DEFAULT_SAMPLES,
+        help=f"Pocet vzorku. Default: {DEFAULT_SAMPLES}",
+    )
+    parser.add_argument(
+        "--max-measurement-time",
+        type=float,
+        default=DEFAULT_MAX_MEASUREMENT_TIME,
+        help=f"Maximalni delka mereni v sekundach. Default: {DEFAULT_MAX_MEASUREMENT_TIME}",
+    )
+    parser.add_argument(
+        "--channel",
+        dest="channels",
+        action="append",
+        help="Kanal ke stazeni, napr. CHAN1. Lze zadat vicekrat. Default: CHAN1, CHAN2",
+    )
+    parser.add_argument(
+        "--high-res",
+        dest="high_res",
+        action="store_true",
+        default=DEFAULT_HIGH_RES,
+        help="Pouzit vysokorozlisene cteni waveformu.",
+    )
+    parser.add_argument(
+        "--normal-res",
+        dest="high_res",
+        action="store_false",
+        help="Pouzit normalni rozliseni waveformu.",
+    )
+    parser.add_argument(
+        "--run-once",
+        action="store_true",
+        help="Provest jen jedno mereni a pak skript ukoncit.",
+    )
+    args = parser.parse_args()
+    args.scopes = dict(args.scope) if args.scope else DEFAULT_OSCILLOSCOPES.copy()
+    args.channels = args.channels or DEFAULT_CHANNELS.copy()
+    args.outdir = os.path.expanduser(args.outdir)
+    return args
 
 class RigolScope:
     def __init__(self, name, ip):
@@ -148,14 +225,24 @@ def poll_trigger_and_frames(scopes, max_integration_time=None):
             
         time.sleep(0.5)
 
-def download_all_frames(sc, start_time, end_time, tag="main", pbar=None, channels=["CHAN1", "CHAN2"]):
-    import sys
-    import os
-
+def download_all_frames(
+    sc,
+    start_time,
+    end_time,
+    outdir,
+    samples,
+    high_res,
+    tag="main",
+    pbar=None,
+    channels=None,
+):
+    channels = channels or DEFAULT_CHANNELS
     run_time = (end_time - start_time).total_seconds()
     filename = start_time.strftime("%Y%m%d_%H%M%S")
     start_wfd = 0.01
     wfd = start_wfd
+    waveform_mode = "MAX" if high_res else "NORM"
+    waveform_points = samples if high_res else 7000
 
     for channel in channels:
         disp = sc.ask(f":{channel}:DISP?").strip()
@@ -167,8 +254,8 @@ def download_all_frames(sc, start_time, end_time, tag="main", pbar=None, channel
         # Configure waveform source and format
         sc.write(f":WAV:SOUR {channel}")
         sc.write(":WAV:FORM BYTE")
-        sc.write(":WAV:MODE MAX") # NORM, MAXimum, RAW
-        sc.write(f":WAV:POIN {samples}")
+        sc.write(f":WAV:MODE {waveform_mode}") # NORM, MAXimum, RAW
+        sc.write(f":WAV:POIN {waveform_points}")
 
         # Read measurement parameters
         sc.write(":WAV:XINC?")
@@ -186,8 +273,8 @@ def download_all_frames(sc, start_time, end_time, tag="main", pbar=None, channel
         frames = int(sc.read(100))
 
         lastwave = bytearray()
-        os.makedirs(OUTDIR, exist_ok=True)
-        h5name = f"{OUTDIR}/{filename}_{sc.name}_{channel}.h5"
+        os.makedirs(outdir, exist_ok=True)
+        h5name = f"{outdir}/{filename}_{sc.name}_{channel}.h5"
         
         with h5py.File(h5name, "w") as hf:
             # Waveform parameters
@@ -245,7 +332,7 @@ def download_all_frames(sc, start_time, end_time, tag="main", pbar=None, channel
                     time.sleep(wfd)
                     sc.write(":WAV:DATA?")
                     
-                    full_data = bytearray(sc.drv.read_raw(samples))
+                    full_data = bytearray(sc.drv.read_raw(waveform_points))
                     
                     if full_data.startswith(b'#'):
                         header_len = 2 + int(full_data[1:2])
@@ -289,19 +376,21 @@ def download_all_frames(sc, start_time, end_time, tag="main", pbar=None, channel
         print(f"Saved {frames} frames to {h5name}")
 
 if __name__ == "__main__":
+    args = parse_args()
+
     print("Inicializuji připojení...")
-    scopes = {name: RigolScope(name, ip) for name, ip in OSCILLOSCOPES.items()}
+    scopes = {name: RigolScope(name, ip) for name, ip in args.scopes.items()}
 
     print(scopes)
     print("Konfiguruji osciloskopy...")
     for sc in scopes.values():
-        sc.write(f":ACQuire:MDEPth {samples}")
+        sc.write(f":ACQuire:MDEPth {args.samples}")
         sc.write(":TRIGger:SWEep NORMal")
 
 
-        if high_res:
+        if args.high_res:
             sc.write(":WAV:MODE MAX") # NORMal, MAXimum, RAW
-            sc.write(f":WAV:POIN {samples}")
+            sc.write(f":WAV:POIN {args.samples}")
         else:
             sc.write(":WAV:MODE NORM") # NORMal, MAXimum, RAW
             sc.write(":WAV:POIN 7000")
@@ -327,7 +416,7 @@ if __name__ == "__main__":
 
             print("Polling průběhu měření (CTRL+C = přerušení)...")
             try:
-                result = poll_trigger_and_frames(scopes, MAX_MEASUREMENT_TIME)
+                result = poll_trigger_and_frames(scopes, args.max_measurement_time)
             except KeyboardInterrupt:
                 print("Přerušeno uživatelem, dokončuji současné měření a pokračuji...")
                 result = "interrupted"
@@ -347,7 +436,7 @@ if __name__ == "__main__":
             # Zjisti celkový počet snímků pro progress bar
             total_frames = 0
             for sc in scopes.values():
-                for ch in ["CHAN1", "CHAN2"]:
+                for ch in args.channels:
                     disp = sc.ask(f":{ch}:DISP?").strip()
                     if disp == "0":
                         continue
@@ -358,11 +447,26 @@ if __name__ == "__main__":
             with tqdm(total=total_frames, desc="Celkem snímků") as pbar:
                 with ThreadPoolExecutor(max_workers=len(scopes)) as executor:
                     futures = [
-                        executor.submit(download_all_frames, sc, start_time, end_time, sc.name, pbar)
+                        executor.submit(
+                            download_all_frames,
+                            sc,
+                            start_time,
+                            end_time,
+                            args.outdir,
+                            args.samples,
+                            args.high_res,
+                            sc.name,
+                            pbar,
+                            args.channels,
+                        )
                         for sc in scopes.values()
                     ]
                     for future in as_completed(futures):
                         future.result()
+
+            if args.run_once:
+                print("Hotovo. Parametr --run-once je aktivni, ukoncuji skript.")
+                break
 
             print("Hotovo. Spouštím nové měření..")
 
