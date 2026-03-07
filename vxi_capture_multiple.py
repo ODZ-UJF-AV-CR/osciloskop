@@ -11,7 +11,7 @@ from tqdm import tqdm
 
 
 OSCILLOSCOPES = {
-    "osc1": "10.42.0.19",
+    "osc1": "192.168.1.224",
 #    "osc2": "192.168.1.182",
     #"oscSi":  "10.9.9.102",
 }
@@ -24,10 +24,12 @@ OSCILLOSCOPES = {
 
 # Filename prefix
 PREFIX = ""
-OUTDIR = "./data/TEST"
+OUTDIR = "~/log_spacedos01B/PIND02_Si_Americium_2"
 
-# Maximální doba měření v sekundách (None = neomezeno, 120 = 2 minuty)
-MAX_MEASUREMENT_TIME = 120  # Nastav na None pro neomezenou dobu
+high_res = True
+samples = 14000 # musi byt nastaveno stejne cislo v osciloskopech
+MAX_MEASUREMENT_TIME = 15*60
+MAX_MEASUREMENT_TIME = 2.5
 
 CHANNEL = "CHAN1"
 
@@ -164,9 +166,9 @@ def download_all_frames(sc, start_time, end_time, tag="main", pbar=None, channel
 
         # Configure waveform source and format
         sc.write(f":WAV:SOUR {channel}")
-        sc.write(":WAV:MODE NORM")
         sc.write(":WAV:FORM BYTE")
-        sc.write(":WAV:POIN 1400")
+        sc.write(":WAV:MODE MAX") # NORM, MAXimum, RAW
+        sc.write(f":WAV:POIN {samples}")
 
         # Read measurement parameters
         sc.write(":WAV:XINC?")
@@ -212,32 +214,38 @@ def download_all_frames(sc, start_time, end_time, tag="main", pbar=None, channel
             hf.attrs["CHANNEL"] = channel
             
             sc.write(":FUNC:WREP:FCUR 1")
-            time.sleep(0.5)
+            time.sleep(0.2)
 
-            # Přečti preamble jednou pro všechny framy (nemění se mezi framy)
             preamble = sc.ask(":WAV:PRE?").strip()
             
-            # Zaciname od snimku 2, protoze 1 je jiz nacteny triggerem pro zaznamenani casu nula. 
-            for n in tqdm(range(1, frames), desc=f"{sc.name}-{channel}", leave=False, disable=(pbar is not None)):
+            for n in tqdm(range(1, frames+1), desc=f"{sc.name}-{channel}", leave=False, disable=(pbar is not None)):
                 sc.write(f":FUNC:WREP:FCUR {n}")
                 
-                # Efektivnější čekání na přepnutí framu
+                # Efektivnější čekání na přepnutí framu s timeoutem
+                frame_switch_timeout = 50  # maximálně 50 pokusů
+                frame_switch_count = 0
                 while True:
                     time.sleep(0.02)
                     fcur = sc.ask(":FUNC:WREP:FCUR?").strip()
                     if str(n) == fcur:
                         break
+                    frame_switch_count += 1
+                    if frame_switch_count > frame_switch_timeout:
+                        print(f"Timeout při přepínání na frame {n}, přeskakuji")
+                        break
 
                 reread_count = 0
-                ctag = float(eval(sc.ask(":FUNCtion:WREPlay:CTAG?")))
+                try:
+                    ctag = float(eval(sc.ask(":FUNCtion:WREPlay:CTAG?")))
+                except:
+                    ctag = 0.0
                 
                 while True:
                     # Pouze jedno sleep před čtením dat
                     time.sleep(wfd)
                     sc.write(":WAV:DATA?")
                     
-                    # Čti data najednou místo po částech
-                    full_data = bytearray(sc.drv.read_raw(1500))
+                    full_data = bytearray(sc.drv.read_raw(samples))
                     
                     if full_data.startswith(b'#'):
                         header_len = 2 + int(full_data[1:2])
@@ -248,8 +256,21 @@ def download_all_frames(sc, start_time, end_time, tag="main", pbar=None, channel
                     if np.array_equal(wave, lastwave):
                         wfd += 0.003
                         reread_count += 1
-                        if reread_count > 5:
-                            print("------------ Wrong trigger level?")
+                        if reread_count > 10:
+                            print(f"------------ Frame {n}: Opakované čtení identických dat (možná špatný trigger level), přeskakuji frame")
+                            # Ulož prázdný dataset nebo poslední dostupná data
+                            dset = hf.create_dataset(str(n), data=wave)
+                            dset.attrs["frame_index"] = n
+                            dset.attrs["channel"] = channel
+                            dset.attrs["scope_name"] = sc.name
+                            dset.attrs["CTAG"] = ctag
+                            dset.attrs["TRG_TIME"] = (start_time + timedelta(seconds=ctag)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+                            dset.attrs["TRG_TIMESTAMP"] = (start_time + timedelta(seconds=ctag)).timestamp()
+                            dset.attrs["preamble"] = preamble
+                            dset.attrs["error"] = "repeated_data_timeout"
+                            if pbar:
+                                pbar.update(1)
+                            break
                     else:
                         dset = hf.create_dataset(str(n), data=wave)
                         dset.attrs["frame_index"] = n
@@ -262,7 +283,8 @@ def download_all_frames(sc, start_time, end_time, tag="main", pbar=None, channel
                         lastwave = wave
                         if pbar:
                             pbar.update(1)
-                        wfd = start_wfd
+                        wfd = start_wfd  # Reset delay pro další frame
+                        reread_count = 0  # Reset počítadla pro další frame
                         break
         print(f"Saved {frames} frames to {h5name}")
 
@@ -271,6 +293,20 @@ if __name__ == "__main__":
     scopes = {name: RigolScope(name, ip) for name, ip in OSCILLOSCOPES.items()}
 
     print(scopes)
+    print("Konfiguruji osciloskopy...")
+    for sc in scopes.values():
+        sc.write(f":ACQuire:MDEPth {samples}")
+        sc.write(":TRIGger:SWEep NORMal")
+
+
+        if high_res:
+            sc.write(":WAV:MODE MAX") # NORMal, MAXimum, RAW
+            sc.write(f":WAV:POIN {samples}")
+        else:
+            sc.write(":WAV:MODE NORM") # NORMal, MAXimum, RAW
+            sc.write(":WAV:POIN 7000")
+
+
 
     while True:
         try:
