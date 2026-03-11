@@ -1,8 +1,11 @@
+# Logování s osciloskopem
+```
+  kakl@kakl-Latitude-5450:~/git/osciloskop$ python3 vxi_capture_multiple.py --scope osc=192.168.1.2 --outdir /home/kakl/DATA --samples 7000 --max-measurement-time 60 --measurement-name TEST2  --help
+```
 
 
 
-kakl@kakl-Latitude-5450:~/git/osciloskop$ python3 vxi_capture_multiple.py --scope osc=192.168.1.2 --outdir /home/kakl/DATA --samples 7000 --max-measurement-time 60 --measurement-name TEST2  --help
-
+```
 usage: vxi_capture_multiple.py [-h] [--scope SCOPE] [--outdir OUTDIR] [--samples SAMPLES] [--max-measurement-time MAX_MEASUREMENT_TIME] [--channel CHANNELS]
                                [--measurement-name MEASUREMENT_NAME] [--high-res] [--normal-res] [--run-once]
 
@@ -21,14 +24,14 @@ options:
   --high-res            Pouzit vysokorozlisene cteni waveformu.
   --normal-res          Pouzit normalni rozliseni waveformu.
   --run-once            Provest jen jedno mereni a pak skript ukoncit.
+```
 
 
 
-
-
+```
 cd ~/git/osciloskop
 python3 vxi_capture_multiple.py --scope osc=192.168.1.2 --outdir /home/kakl/DATA --samples 7000 --max-measurement-time 60 --measurement-name TEST2
-
+```
 
 
 
@@ -37,12 +40,12 @@ python3 vxi_capture_multiple.py --scope osc=192.168.1.2 --outdir /home/kakl/DATA
 # Logovani spacedos
 
 
-
+```
 kakl@kakl-Latitude-5491:~/git/SPACEDOS04/sw$ ./log_spacedos.sh 
 SPACEDOS data logger
 To exit, press ctrl-c
 usage example: ./log_spacedos.sh /dev/ttyUSB0 [description]
-
+```
 
 
 
