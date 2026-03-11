@@ -33,7 +33,11 @@ cd ~/git/osciloskop
 python3 vxi_capture_multiple.py --scope osc=192.168.1.2 --outdir /home/kakl/DATA --samples 7000 --max-measurement-time 60 --measurement-name TEST2
 ```
 
+### Zobrazení dat
 
+```
+python3 waveform_viewer.py <filename>
+```
 
 
 
