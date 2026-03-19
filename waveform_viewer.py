@@ -12,11 +12,17 @@ from pathlib import Path
 
 import h5py
 import numpy as np
-import pyqtgraph as pg
-from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
+
+try:
+    import pyqtgraph as pg
+    from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
+    HAS_PYQTGRAPH = True
+except ImportError:
+    HAS_PYQTGRAPH = False
 
 
-pg.setConfigOptions(antialias=False)
+if HAS_PYQTGRAPH:
+    pg.setConfigOptions(antialias=False)
 
 CURRENT_COLORS = ["#ffd166", "#4cc9f0", "#ef476f", "#95d67b", "#f78c6b", "#c77dff"]
 MAX_RENDER_POINTS = 1500
@@ -241,6 +247,372 @@ class H5WaveformDataset:
         return np.asarray(x_parts, dtype=np.float64), np.asarray(y_parts, dtype=np.float64)
 
 
+# ---------------------------------------------------------------------------
+#  Matplotlib oscilloscope-style preview renderer
+# ---------------------------------------------------------------------------
+
+_MPL_BACKGROUND  = "#0a0a0a"
+_MPL_PLOT_BG     = "#0c1117"
+_MPL_GRID_COLOR  = "#1a3a2a"
+_MPL_GRID_MINOR  = "#0f1f17"
+_MPL_AXIS_COLOR  = "#3a7a5a"
+_MPL_TEXT_COLOR  = "#b0d0b8"
+_MPL_TITLE_COLOR = "#40e070"
+_MPL_TRACE_COLORS = CURRENT_COLORS
+
+
+def _h5_attr_str(attrs, key: str, default: str = "") -> str:
+    """Read an HDF5 attribute as a Python str."""
+    if key not in attrs:
+        return default
+    val = attrs[key]
+    if isinstance(val, bytes):
+        return val.decode("utf-8", errors="replace")
+    return str(val)
+
+
+def _apply_mpl_oscilloscope_style() -> None:
+    import matplotlib.pyplot as plt
+    plt.rcParams.update({
+        "figure.facecolor":  _MPL_BACKGROUND,
+        "axes.facecolor":    _MPL_PLOT_BG,
+        "axes.edgecolor":    _MPL_AXIS_COLOR,
+        "axes.labelcolor":   _MPL_TEXT_COLOR,
+        "xtick.color":       _MPL_AXIS_COLOR,
+        "ytick.color":       _MPL_AXIS_COLOR,
+        "text.color":        _MPL_TEXT_COLOR,
+        "grid.color":        _MPL_GRID_COLOR,
+        "grid.linestyle":    "--",
+        "grid.linewidth":    0.5,
+        "grid.alpha":        0.7,
+        "font.family":       "monospace",
+        "font.size":         10,
+    })
+
+
+def _draw_trigger_lines(ax, dataset: H5WaveformDataset,
+                        color_by_series: dict[str, str]) -> None:
+    """Draw trigger level (horizontal) and trigger time (vertical, x=0) lines."""
+    drawn: set[tuple] = set()
+    trig_x_drawn = False
+
+    for spec in dataset.series_specs:
+        container = (dataset.handle if spec.container_path is None
+                     else dataset.handle[spec.container_path])
+
+        trig_level = None
+        if spec.metadata_in_attrs:
+            if "TRIG_LEVEL" in container.attrs:
+                trig_level = float(np.asarray(container.attrs["TRIG_LEVEL"]).reshape(-1)[0])
+        elif "TRIG_LEVEL" in container:
+            trig_level = dataset._container_scalar(container, "TRIG_LEVEL", False)
+        if trig_level is None:
+            continue
+
+        trig_channel: str | None = None
+        if spec.metadata_in_attrs and "TRIG_CHANNEL" in container.attrs:
+            raw = container.attrs["TRIG_CHANNEL"]
+            trig_channel = raw.decode() if isinstance(raw, bytes) else str(raw)
+        elif not spec.metadata_in_attrs and "TRIG_CHANNEL" in container:
+            raw = np.asarray(container["TRIG_CHANNEL"]).flat[0]
+            trig_channel = raw.decode() if isinstance(raw, bytes) else str(raw)
+
+        key = (trig_channel, trig_level)
+        if key in drawn:
+            continue
+        drawn.add(key)
+
+        color = color_by_series.get(trig_channel, _MPL_AXIS_COLOR) if trig_channel else _MPL_AXIS_COLOR
+        ch_label = f" ({trig_channel})" if trig_channel else ""
+        ax.axhline(y=trig_level, color=color, linestyle="--", linewidth=0.7, alpha=0.6,
+                   label=f"Trig{ch_label} {trig_level:.4g} V")
+        if not trig_x_drawn:
+            ax.axvline(x=0.0, color=color, linestyle="--", linewidth=0.7, alpha=0.6)
+            trig_x_drawn = True
+
+
+def _format_run_time(dataset: H5WaveformDataset) -> str:
+    """Return a human-readable measurement time string for the figure footer."""
+    if "START_TIME" in dataset.handle.attrs:
+        start_raw = _h5_attr_str(dataset.handle.attrs, "START_TIME")
+        end_raw = _h5_attr_str(dataset.handle.attrs, "END_TIME")
+        try:
+            start_dt = dt.datetime.fromisoformat(start_raw.replace("Z", "+00:00"))
+            start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return f"{start_raw} \u2192 {end_raw}".strip() if end_raw else start_raw
+        if not end_raw:
+            return start_str
+        try:
+            end_dt = dt.datetime.fromisoformat(end_raw.replace("Z", "+00:00"))
+            if start_dt.date() == end_dt.date():
+                end_str = end_dt.strftime("%H:%M:%S")
+            else:
+                end_str = end_dt.strftime("%Y-%m-%d %H:%M:%S")
+            dur = (end_dt - start_dt).total_seconds()
+            return f"{start_str} \u2192 {end_str} ({dur:.1f}s)"
+        except ValueError:
+            return f"{start_str} \u2192 {end_raw}"
+    for key in ("THETIME", "TIME"):
+        if key in dataset.handle:
+            ts = dataset._scalar(key, default=0.0)
+            try:
+                return dt.datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S UTC")
+            except (OverflowError, OSError, ValueError):
+                pass
+    return ""
+
+
+def _format_si(value: float, unit: str) -> str:
+    """Format a value with SI prefix, e.g. 0.0256 V -> '25.6 mV'."""
+    if value == 0:
+        return f"0 {unit}"
+    prefixes = [
+        (1e-12, "p"), (1e-9, "n"), (1e-6, "\u00b5"), (1e-3, "m"),
+        (1, ""), (1e3, "k"), (1e6, "M"),
+    ]
+    abs_val = abs(value)
+    for scale, prefix in prefixes:
+        if abs_val < scale * 1000:
+            return f"{value / scale:.4g} {prefix}{unit}"
+    return f"{value:.4g} {unit}"
+
+
+def _add_oscilloscope_footer(fig, dataset: H5WaveformDataset, sample_id: int) -> None:
+    """Add scope name, IP, time range, V/div, s/div below the plot."""
+    left_parts: list[str] = []
+    scope = _h5_attr_str(dataset.handle.attrs, "SCOPE_NAME")
+    ip = _h5_attr_str(dataset.handle.attrs, "IP")
+    if scope:
+        left_parts.append(f"Scope: {scope}")
+    if ip:
+        left_parts.append(ip)
+    left_parts.append(dataset.path.name)
+
+    right_parts = [f"Sample {sample_id}/{len(dataset.sample_ids)}"]
+    run_time = _format_run_time(dataset)
+    if run_time:
+        right_parts.append(run_time)
+
+    # # -- V/div, s/div --------------------------------------------------------
+    # scale_parts: list[str] = []
+    # s_div_shown = False
+    # for spec in dataset.series_specs:
+    #     container = (dataset.handle if spec.container_path is None
+    #                  else dataset.handle[spec.container_path])
+    #     yinc = dataset._container_scalar(container, spec.yinc_key,
+    #                                      spec.metadata_in_attrs, default=0.0)
+    #     if yinc > 0:
+    #         v_div = yinc * 32  # 256 ADC steps / 8 vertical divisions
+    #         scale_parts.append(f"{spec.title}: {_format_si(v_div, 'V')}/div")
+    #
+    #     if not s_div_shown:
+    #         xinc = dataset._container_scalar(container, spec.xinc_key,
+    #                                          spec.metadata_in_attrs, default=0.0)
+    #         if xinc > 0:
+    #             wf = dataset.waveform(sample_id, spec.name)
+    #             if wf is not None and wf.x_us.size > 1:
+    #                 time_span_s = (wf.x_us[-1] - wf.x_us[0]) * 1e-6
+    #                 s_div = time_span_s / 10
+    #                 scale_parts.append(f"{_format_si(s_div, 's')}/div")
+    #                 s_div_shown = True
+
+    fig.text(0.02, 0.01, "  |  ".join(left_parts), fontsize=8,
+             color=_MPL_TEXT_COLOR, family="monospace", va="bottom")
+    # if scale_parts:
+    #     fig.text(0.5, 0.01, "  |  ".join(scale_parts), fontsize=8,
+    #              color=_MPL_TEXT_COLOR, family="monospace", va="bottom", ha="center")
+    fig.text(0.98, 0.01, "  |  ".join(right_parts), fontsize=8,
+             color=_MPL_TEXT_COLOR, family="monospace", va="bottom", ha="right")
+
+
+def _create_waveform_figure(
+    dataset: H5WaveformDataset,
+    sample_id: int,
+    figsize: tuple[float, float] = (14, 9),
+    xlim: tuple[float, float] | None = None,
+    ylim: tuple[float, float] | None = None,
+    locked_samples: dict[int, str] | None = None,
+):
+    """Create a matplotlib figure with waveform plot in oscilloscope style.
+
+    Parameters
+    ----------
+    locked_samples : dict[int, str] | None
+        Mapping ``{sample_id: series_name_for_color}`` of locked samples to
+        overlay as dashed traces.  Pass ``None`` or empty dict to skip.
+
+    Returns (fig, has_data).  Caller is responsible for saving / showing /
+    closing the figure.
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib.ticker as ticker
+
+    _apply_mpl_oscilloscope_style()
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    # -- plot waveforms --------------------------------------------------------
+    color_by_series: dict[str, str] = {}
+    has_data = False
+    for idx, spec in enumerate(dataset.series_specs):
+        wf = dataset.waveform(sample_id, spec.name)
+        if wf is None:
+            continue
+        has_data = True
+        color = _MPL_TRACE_COLORS[idx % len(_MPL_TRACE_COLORS)]
+        color_by_series[spec.name] = color
+        ax.plot(wf.x_us, wf.y_v, color=color, linewidth=0.8, alpha=0.92,
+                label=spec.title)
+
+    # -- locked samples (dashed overlay) ---------------------------------------
+    if locked_samples:
+        for locked_id in locked_samples:
+            for idx, spec in enumerate(dataset.series_specs):
+                wf = dataset.waveform(locked_id, spec.name)
+                if wf is None:
+                    continue
+                color = color_by_series.get(spec.name,
+                            _MPL_TRACE_COLORS[idx % len(_MPL_TRACE_COLORS)])
+                ax.plot(wf.x_us, wf.y_v, color=color, linewidth=0.6, alpha=0.5,
+                        linestyle="--", label=f"{spec.title} #{locked_id}")
+
+    if not has_data:
+        return fig, False
+
+    # -- trigger lines ---------------------------------------------------------
+    _draw_trigger_lines(ax, dataset, color_by_series)
+
+    # -- axes, grid, labels ----------------------------------------------------
+    ax.set_xlabel("Time [\u00b5s]", fontsize=11)
+    ax.set_ylabel("Amplitude [V]", fontsize=11)
+    if xlim is not None:
+        ax.set_xlim(xlim)
+    if ylim is not None:
+        ax.set_ylim(ylim)
+    ax.grid(True, which="major", color=_MPL_GRID_COLOR, linewidth=0.5)
+    ax.grid(True, which="minor", color=_MPL_GRID_MINOR, linewidth=0.3, alpha=0.5)
+    ax.minorticks_on()
+    ax.tick_params(which="both", direction="in", length=4)
+    ax.xaxis.set_minor_locator(ticker.AutoMinorLocator(5))
+    ax.yaxis.set_minor_locator(ticker.AutoMinorLocator(5))
+
+    # -- title -----------------------------------------------------------------
+    meas = _h5_attr_str(dataset.handle.attrs, "MEASUREMENT_NAME")
+    title = f"Waveform #{sample_id}"
+    if meas:
+        title = f"{meas}  \u2014  {title}"
+    ax.set_title(title, fontsize=13, color=_MPL_TITLE_COLOR, fontweight="bold", pad=12)
+
+    # -- legend ----------------------------------------------------------------
+    ax.legend(loc="upper right", fontsize=9, framealpha=0.5,
+              edgecolor=_MPL_AXIS_COLOR, facecolor=_MPL_PLOT_BG,
+              labelcolor=_MPL_TEXT_COLOR)
+
+    # -- footer metadata -------------------------------------------------------
+    fig.tight_layout(rect=[0, 0.04, 1, 1])
+    _add_oscilloscope_footer(fig, dataset, sample_id)
+
+    return fig, True
+
+
+def render_waveform_preview(
+    dataset: H5WaveformDataset,
+    sample_id: int,
+    output_path: str | Path | None = None,
+    dpi: int = 200,
+    figsize: tuple[float, float] = (14, 9),
+    xlim: tuple[float, float] | None = None,
+    ylim: tuple[float, float] | None = None,
+) -> None:
+    """Generate a PNG waveform preview in oscilloscope style."""
+    import matplotlib.pyplot as plt
+
+    fig, has_data = _create_waveform_figure(dataset, sample_id, figsize=figsize,
+                                            xlim=xlim, ylim=ylim)
+    if not has_data:
+        plt.close(fig)
+        print(f"Sample {sample_id}: no data to plot.")
+        return
+
+    if output_path is None:
+        output_path = dataset.path.with_name(f"{dataset.path.stem}_{sample_id}.png")
+    output_path = Path(output_path)
+
+    fig.savefig(output_path, dpi=dpi, facecolor=fig.get_facecolor(), bbox_inches="tight")
+    plt.close(fig)
+
+
+def render_all_previews(
+    path: str | Path,
+    sample_ids: list[int] | None = None,
+    output_dir: str | Path | None = None,
+    dpi: int = 200,
+) -> None:
+    """Vygeneruje PNG náhledy pro vybrané (nebo všechny) vzorky v H5 souboru.
+
+    Výstupní složka se ve výchozím stavu pojmenuje stejně jako zdrojový H5
+    soubor (bez přípony).  Všechny obrázky sdílejí stejné měřítko os.
+    """
+    dataset = H5WaveformDataset(path)
+    try:
+        ids = sample_ids if sample_ids else dataset.sample_ids
+
+        # -- výstupní adresář pojmenovaný podle H5 souboru ---------------------
+        if output_dir is not None:
+            out = Path(output_dir)
+        else:
+            out = dataset.path.parent / dataset.path.stem
+        out.mkdir(parents=True, exist_ok=True)
+
+        # -- 1. průchod: zjistit globální rozsahy os ---------------------------
+        x_min = np.inf
+        x_max = -np.inf
+        y_min = np.inf
+        y_max = -np.inf
+        valid_ids: list[int] = []
+
+        for sid in ids:
+            if sid not in dataset.sample_ids:
+                print(f"Vzorek {sid} nenalezen, přeskakuji.")
+                continue
+            for spec in dataset.series_specs:
+                wf = dataset.waveform(sid, spec.name)
+                if wf is None:
+                    continue
+                x_min = min(x_min, float(wf.x_us[0]))
+                x_max = max(x_max, float(wf.x_us[-1]))
+                y_min = min(y_min, float(np.min(wf.y_v)))
+                y_max = max(y_max, float(np.max(wf.y_v)))
+                if sid not in valid_ids:
+                    valid_ids.append(sid)
+
+        if not valid_ids:
+            print("Žádná platná data k vykreslení.")
+            return
+
+        # malý padding kolem dat
+        y_pad = (y_max - y_min) * 0.05 if y_max > y_min else 0.1
+        x_pad = (x_max - x_min) * 0.01 if x_max > x_min else 0.1
+        xlim = (x_min - x_pad, x_max + x_pad)
+        ylim = (y_min - y_pad, y_max + y_pad)
+
+        print(f"Generuji {len(valid_ids)} náhledů do {out}/  (xlim={xlim}, ylim={ylim})")
+
+        # -- 2. průchod: vykreslení se sjednoceným měřítkem --------------------
+        from tqdm import tqdm
+        for sid in tqdm(valid_ids, desc="Rendering", unit="img"):
+            out_file = out / f"{dataset.path.stem}_{sid}.png"
+            render_waveform_preview(dataset, sid, output_path=out_file, dpi=dpi,
+                                    xlim=xlim, ylim=ylim)
+    finally:
+        dataset.close()
+
+
+# ---------------------------------------------------------------------------
+#  PyQtGraph interactive viewer (vyžaduje PyQt / pyqtgraph)
+# ---------------------------------------------------------------------------
+
 class WaveformViewer(QtWidgets.QMainWindow):
     def __init__(self, initial_path: str | None = None, initial_sample: int | None = None) -> None:
         super().__init__()
@@ -253,6 +625,7 @@ class WaveformViewer(QtWidgets.QMainWindow):
         self.main_plot: pg.PlotWidget | None = None
         self.empty_plot_label: QtWidgets.QLabel | None = None
         self.pending_autorange = True
+        self.high_res = False
 
         self._build_ui()
 
@@ -303,6 +676,17 @@ class WaveformViewer(QtWidgets.QMainWindow):
         self.clear_button = QtWidgets.QPushButton("Vymazat zamknuté")
         self.clear_button.clicked.connect(self._clear_locks)
         controls_layout.addWidget(self.clear_button)
+
+        self.highres_button = QtWidgets.QPushButton("High-res")
+        self.highres_button.setCheckable(True)
+        self.highres_button.setToolTip("Přepnout mezi decimovanými a plnými daty")
+        self.highres_button.clicked.connect(self._toggle_high_res)
+        controls_layout.addWidget(self.highres_button)
+
+        self.mpl_button = QtWidgets.QPushButton("Matplotlib")
+        self.mpl_button.setToolTip("Otevřít aktuální vzorek v matplotlib okně")
+        self.mpl_button.clicked.connect(self._open_matplotlib)
+        controls_layout.addWidget(self.mpl_button)
 
         self.path_label = QtWidgets.QLabel()
         self.path_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -379,6 +763,8 @@ class WaveformViewer(QtWidgets.QMainWindow):
         self.lock_button.setEnabled(False)
         self.remove_button.setEnabled(False)
         self.clear_button.setEnabled(False)
+        self.highres_button.setEnabled(False)
+        self.mpl_button.setEnabled(False)
         self.locked_list.setEnabled(False)
         self.current_label.setText("0 / 0")
         self._rebuild_plots()
@@ -389,6 +775,8 @@ class WaveformViewer(QtWidgets.QMainWindow):
         self.lock_button.setEnabled(True)
         self.remove_button.setEnabled(True)
         self.clear_button.setEnabled(True)
+        self.highres_button.setEnabled(True)
+        self.mpl_button.setEnabled(True)
         self.locked_list.setEnabled(True)
 
     def _open_file_dialog(self) -> None:
@@ -546,6 +934,17 @@ class WaveformViewer(QtWidgets.QMainWindow):
     def _current_pen(self, index: int):
         return pg.mkPen(CURRENT_COLORS[index % len(CURRENT_COLORS)], width=2.6)
 
+    def _toggle_high_res(self) -> None:
+        self.high_res = self.highres_button.isChecked()
+        self.pending_autorange = True
+        self._refresh_plots()
+
+    def _get_waveform(self, sample_id: int, series_name: str) -> Waveform | None:
+        """Return full or decimated waveform based on high_res toggle."""
+        if self.high_res:
+            return self.dataset.waveform(sample_id, series_name)
+        return self.dataset.display_waveform(sample_id, series_name)
+
     def _draw_plot(self, plot: pg.PlotWidget) -> None:
         if self.dataset is None:
             plot.clear()
@@ -563,14 +962,14 @@ class WaveformViewer(QtWidgets.QMainWindow):
 
         for sample_id, lock_color in self.locked_samples.items():
             for spec in self.dataset.series_specs:
-                waveform = self.dataset.display_waveform(sample_id, spec.name)
+                waveform = self._get_waveform(sample_id, spec.name)
                 if waveform is None:
                     continue
                 pen = pg.mkPen(color=lock_color, width=1.2, style=QtCore.Qt.PenStyle.DashLine)
                 plot.plot(waveform.x_us, waveform.y_v, pen=pen, name=f"{spec.title} locked {sample_id}")
 
         for index, spec in enumerate(self.dataset.series_specs):
-            current_waveform = self.dataset.display_waveform(current_sample_id, spec.name)
+            current_waveform = self._get_waveform(current_sample_id, spec.name)
             if current_waveform is None:
                 continue
             plot.plot(
@@ -596,6 +995,22 @@ class WaveformViewer(QtWidgets.QMainWindow):
             return
         self._draw_plot(self.main_plot)
 
+    def _open_matplotlib(self) -> None:
+        if self.dataset is None:
+            return
+        self._show_matplotlib_window(self._current_sample_id())
+
+    def _show_matplotlib_window(self, sample_id: int) -> None:
+        import matplotlib.pyplot as plt
+
+        locked = dict(self.locked_samples) if self.locked_samples else None
+        fig, has_data = _create_waveform_figure(
+            self.dataset, sample_id, locked_samples=locked)
+        if not has_data:
+            plt.close(fig)
+            return
+        plt.show(block=False)
+
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         if self.dataset is not None:
             self.dataset.close()
@@ -603,19 +1018,68 @@ class WaveformViewer(QtWidgets.QMainWindow):
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="PyQtGraph viewer pro waveformy uložené v HDF5.")
+    parser = argparse.ArgumentParser(description="PyQtGraph viewer / matplotlib preview pro waveformy uložené v HDF5.")
     parser.add_argument("path", nargs="?", help="Cesta k HDF5 souboru.")
     parser.add_argument(
         "--sample",
         type=int,
         default=None,
-        help="Vzorek, na kterém se má viewer po startu otevřít.",
+        help="Vzorek, na kterém se má viewer po startu otevřít (GUI) nebo vygenerovat náhled (--preview).",
+    )
+    parser.add_argument(
+        "--preview",
+        action="store_true",
+        help="Místo GUI vygeneruj PNG náhled(y) waveformů přes matplotlib.",
+    )
+    parser.add_argument(
+        "--preview-all",
+        action="store_true",
+        help="Vygeneruj náhledy pro všechny vzorky v souboru.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Adresář pro výstupní PNG soubory (výchozí: vedle H5 souboru).",
+    )
+    parser.add_argument(
+        "--dpi",
+        type=int,
+        default=200,
+        help="DPI výstupních náhledů (výchozí: 200).",
     )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
+
+    # -- režim matplotlib náhledů ----------------------------------------------
+    if args.preview or args.preview_all:
+        if not args.path:
+            print("Chyba: pro --preview/--preview-all je nutné zadat cestu k H5 souboru.")
+            return 1
+
+        if args.preview_all:
+            render_all_previews(args.path, output_dir=args.output_dir, dpi=args.dpi)
+        else:
+            dataset = H5WaveformDataset(args.path)
+            try:
+                sid = args.sample if args.sample is not None else dataset.sample_ids[0]
+                out_dir = Path(args.output_dir) if args.output_dir else None
+                out_file = (out_dir / f"{dataset.path.stem}_{sid}.png") if out_dir else None
+                if out_dir:
+                    out_dir.mkdir(parents=True, exist_ok=True)
+                render_waveform_preview(dataset, sid, output_path=out_file, dpi=args.dpi)
+            finally:
+                dataset.close()
+        return 0
+
+    # -- režim GUI -------------------------------------------------------------
+    if not HAS_PYQTGRAPH:
+        print("Chyba: pro GUI režim je nutné mít nainstalovaný pyqtgraph a PyQt.")
+        return 1
+
     app = QtWidgets.QApplication(sys.argv)
     viewer = WaveformViewer(initial_path=args.path, initial_sample=args.sample)
     viewer.show()
