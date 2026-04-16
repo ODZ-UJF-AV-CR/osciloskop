@@ -1,3 +1,6 @@
 h5py
 python-vxi11
 tqdm
+matplotlib
+pyqtgraph
+PySide6

@@ -4,9 +4,13 @@
 Capture waveform frames from one or more Rigol oscilloscopes.
 Channels from one scope are stored as groups inside one HDF5 file.
 
+Varianta s prokládaným stahováním: pro každý frame se stáhnou všechny kanály,
+než se přepne na další frame. To by mělo být rychlejší, protože osciloskop
+nemusí znovu načítat stejný frame z paměti.
+
 Examples:
-    python3 vxi_capture_multiple.py --scope osc1=192.168.1.224 --measurement-name test_01 --run-once
-    python3 vxi_capture_multiple.py --scope osc1=192.168.1.224 --scope osc2=192.168.1.182 \
+    python3 vxi_capture_multiple_interleaved.py --scope osc1=192.168.1.224 --measurement-name test_01 --run-once
+    python3 vxi_capture_multiple_interleaved.py --scope osc1=192.168.1.224 --scope osc2=192.168.1.182 \
         --outdir ~/captures/test --samples 14000 --max-measurement-time 300 \
         --measurement-name americium_run --channel CHAN1 --channel CHAN2
 """
@@ -309,22 +313,24 @@ def download_all_frames(
         hf.attrs["IP"] = sc.ip
         hf.attrs["MEASUREMENT_NAME"] = measurement_name
 
+        # --- Fáze 1: Zjistit aktivní kanály, přečíst parametry, vytvořit HDF5 skupiny ---
+        active_channels = []
+        channel_info = {}  # channel -> {group, xinc, yinc, ...}
+
         for channel in channels:
-            if stop_event is not None and stop_event.is_set():
-                tqdm.write(f"{sc.name}: Přerušeno, dokončuji zápis souboru...")
-                break
             disp = sc.ask(f":{channel}:DISP?").strip()
             if disp == "0":
                 tqdm.write(f"{sc.name}: {channel} is not enabled")
                 continue
-            tqdm.write(f"{sc.name}: Reading out {channel}")
-            wfd = start_wfd
-            lastwave = bytearray()
+
+            tqdm.write(f"{sc.name}: Configuring {channel}")
+            active_channels.append(channel)
+            saved_channels.append(channel)
 
             # Configure waveform source and format
             sc.write(f":WAV:SOUR {channel}")
             sc.write(":WAV:FORM BYTE")
-            sc.write(f":WAV:MODE {waveform_mode}") # NORM, MAXimum, RAW
+            sc.write(f":WAV:MODE {waveform_mode}")
             sc.write(f":WAV:POIN {waveform_points}")
 
             # Read measurement parameters
@@ -343,7 +349,6 @@ def download_all_frames(
             frames = int(sc.read(100))
 
             channel_group = hf.create_group(channel)
-            saved_channels.append(channel)
             channel_group.attrs["FRAMES"] = frames
             channel_group.attrs["XINC"] = xinc
             channel_group.attrs["YINC"] = yinc
@@ -353,84 +358,119 @@ def download_all_frames(
             channel_group.attrs["TRIG_CHANNEL"] = trig_channel
             channel_group.attrs["CHANNEL"] = channel
 
-            sc.write(":FUNC:WREP:FCUR 1")
-            time.sleep(0.2)
-
             preamble = sc.ask(":WAV:PRE?").strip()
 
-            for n in tqdm(range(1, frames+1), desc=f"{sc.name}-{channel}", leave=False, disable=(pbar is not None)):
-                if stop_event is not None and stop_event.is_set():
-                    tqdm.write(f"{sc.name}: Přerušeno, dokončuji zápis souboru...")
-                    break
-                sc.write(f":FUNC:WREP:FCUR {n}")
+            channel_info[channel] = {
+                "group": channel_group,
+                "xinc": xinc,
+                "yinc": yinc,
+                "yorig": yorig,
+                "xorig": xorig,
+                "trig_level": trig_level,
+                "trig_channel": trig_channel,
+                "frames": frames,
+                "preamble": preamble,
+                "lastwave": bytearray(),
+                "wfd": start_wfd,
+            }
 
-                # Efektivnější čekání na přepnutí framu s timeoutem
-                frame_switch_timeout = 50  # maximálně 50 pokusů
-                frame_switch_count = 0
-                while True:
-                    time.sleep(0.02)
-                    fcur = sc.ask(":FUNC:WREP:FCUR?").strip()
-                    if str(n) == fcur:
-                        break
-                    frame_switch_count += 1
-                    if frame_switch_count > frame_switch_timeout:
-                        tqdm.write(f"Timeout při přepínání na frame {n}, přeskakuji")
-                        break
+        if not active_channels:
+            tqdm.write(f"{sc.name}: Žádný aktivní kanál, přeskakuji.")
+            return
+
+        # Počet framů — vezmeme minimum přes kanály (měly by být stejné)
+        frames = min(ci["frames"] for ci in channel_info.values())
+
+        sc.write(":FUNC:WREP:FCUR 1")
+        time.sleep(0.2)
+
+        # --- Fáze 2: Prokládané stahování: frame 1 ch1+ch2, frame 2 ch1+ch2, ... ---
+        for n in tqdm(range(1, frames+1), desc=f"{sc.name}-frames", leave=False, disable=(pbar is not None)):
+            if stop_event is not None and stop_event.is_set():
+                tqdm.write(f"{sc.name}: Přerušeno, dokončuji zápis souboru...")
+                break
+
+            sc.write(f":FUNC:WREP:FCUR {n}")
+
+            # Čekání na přepnutí framu
+            frame_switch_timeout = 50
+            frame_switch_count = 0
+            while True:
+                time.sleep(0.02)
+                fcur = sc.ask(":FUNC:WREP:FCUR?").strip()
+                if str(n) == fcur:
+                    break
+                frame_switch_count += 1
+                if frame_switch_count > frame_switch_timeout:
+                    tqdm.write(f"Timeout při přepínání na frame {n}, přeskakuji")
+                    break
+
+            # Přečíst CTAG jednou pro tento frame
+            try:
+                ctag = float(eval(sc.ask(":FUNCtion:WREPlay:CTAG?")))
+            except:
+                ctag = 0.0
+
+            # Stáhnout data pro každý kanál z tohoto framu
+            for channel in active_channels:
+                ci = channel_info[channel]
+                wfd = ci["wfd"]
+
+                # Přepnout zdroj na aktuální kanál
+                sc.write(f":WAV:SOUR {channel}")
+                sc.write(":WAV:FORM BYTE")
+                sc.write(f":WAV:MODE {waveform_mode}")
+                sc.write(f":WAV:POIN {waveform_points}")
 
                 reread_count = 0
-                try:
-                    ctag = float(eval(sc.ask(":FUNCtion:WREPlay:CTAG?")))
-                except:
-                    ctag = 0.0
-                
+
                 while True:
-                    # Pouze jedno sleep před čtením dat
                     time.sleep(wfd)
                     sc.write(":WAV:DATA?")
-                    
+
                     full_data = bytearray(sc.drv.read_raw(waveform_points))
-                    
+
                     if full_data.startswith(b'#'):
                         header_len = 2 + int(full_data[1:2])
                         wave = full_data[header_len:-1]
                     else:
                         wave = full_data[11:-1]
-                    
-                    if np.array_equal(wave, lastwave):
+
+                    if np.array_equal(wave, ci["lastwave"]):
                         wfd += 0.003
                         reread_count += 1
                         if reread_count > 10:
                             tqdm.write(
-                                f"Frame {n}: Opakované čtení identických dat, přeskakuji frame"
+                                f"Frame {n} {channel}: Opakované čtení identických dat, přeskakuji"
                             )
-                            # Ulož prázdný dataset nebo poslední dostupná data
-                            dset = channel_group.create_dataset(str(n), data=wave)
+                            dset = ci["group"].create_dataset(str(n), data=wave)
                             dset.attrs["frame_index"] = n
                             dset.attrs["channel"] = channel
                             dset.attrs["scope_name"] = sc.name
                             dset.attrs["CTAG"] = ctag
                             dset.attrs["TRG_TIME"] = (start_time + timedelta(seconds=ctag)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
                             dset.attrs["TRG_TIMESTAMP"] = (start_time + timedelta(seconds=ctag)).timestamp()
-                            dset.attrs["preamble"] = preamble
+                            dset.attrs["preamble"] = ci["preamble"]
                             dset.attrs["error"] = "repeated_data_timeout"
                             if pbar:
                                 pbar.update(1)
                             break
                     else:
-                        dset = channel_group.create_dataset(str(n), data=wave)
+                        dset = ci["group"].create_dataset(str(n), data=wave)
                         dset.attrs["frame_index"] = n
                         dset.attrs["channel"] = channel
                         dset.attrs["scope_name"] = sc.name
                         dset.attrs["CTAG"] = ctag
                         dset.attrs["TRG_TIME"] = (start_time + timedelta(seconds=ctag)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
                         dset.attrs["TRG_TIMESTAMP"] = (start_time + timedelta(seconds=ctag)).timestamp()
-                        dset.attrs["preamble"] = preamble
-                        lastwave = wave
+                        dset.attrs["preamble"] = ci["preamble"]
+                        ci["lastwave"] = wave
                         if pbar:
                             pbar.update(1)
-                        wfd = start_wfd  # Reset delay pro další frame
-                        reread_count = 0  # Reset počítadla pro další frame
+                        ci["wfd"] = start_wfd
+                        reread_count = 0
                         break
+
     tqdm.write(f"Saved channels {', '.join(saved_channels)} to {h5name}")
 
 if __name__ == "__main__":
@@ -501,7 +541,7 @@ if __name__ == "__main__":
             
             print(f"Měření dokončeno ({result}), pokračuji stažením dat...")
 
-            print("Stahuji výsledné frames paralelně...")
+            print("Stahuji výsledné frames (prokládaně po framech)...")
 
             # Zjisti celkový počet snímků pro progress bar
             total_frames = 0

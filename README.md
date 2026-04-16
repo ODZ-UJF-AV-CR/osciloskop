@@ -9,6 +9,22 @@ Script `vxi_capture_multiple.py` umi spoustet opakovana mereni nebo jedno mereni
 Defaultni `--max-measurement-time` je 300 sekund, tedy 5 minut.
 Kanaly jednoho osciloskopu se ukladaji do jednoho HDF5 souboru, kazdy jako vlastni skupina.
 
+## oscilloscope_app.py
+Nova desktop aplikace v `PySide6` pro obsluhu vice osciloskopu.
+
+Umi:
+- spravovat vice osciloskopu najednou (`name + IP`)
+- spustit `single trigger` i `multiple triggers`
+- pouzit trigger osciloskopu nebo vynutit trigger z aplikace (`:TFORce`)
+- ulozit data do HDF5
+- po dokonceni vygenerovat PNG nahledy pres renderer z `waveform_viewer.py`
+- rovnou zobrazit posledni ziskany waveform v GUI
+
+Zakladni spusteni:
+```bash
+python3 oscilloscope_app.py --scope osc1=10.11.111.36
+```
+
 Zakladni pouziti:
 ```bash
 python3 vxi_capture_multiple.py --scope osc1=192.168.1.224 --measurement-name test_01 --run-once
